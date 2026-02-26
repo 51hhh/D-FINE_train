@@ -1,0 +1,17 @@
+# 组合B（主对比-中等）: RT-DETRv2-R34，预训练微调
+stage: "B_baseline"
+purpose: "中等规模预训练基线，用于与 03 对比"
+compare_with: "03_dfine_s_coco_pretrain.yaml"
+next_if_better: "进入 22 验证更大模型上限"
+profile_name: rtdetrv2_r34_coco_pretrain
+model_type: rtdetr_lyu
+repo_dir: third_party/RT-DETR/rtdetrv2_pytorch
+base_config: configs/rtdetrv2/rtdetrv2_r34vd_120e_coco.yml
+epochs: 120
+seed: 0
+device: "0"
+use_amp: true
+pretrained: "benchmark/pretrained/rtdetr/rtdetrv2_r34vd_120e_coco_ema.pth" # 已下载
+output_group: pairB_rtdetr_r34_pretrain
+overrides:
+  PResNet.pretrained: true

@@ -1,0 +1,7 @@
+# 数据集统一配置（只需改这一处）
+name: volleyball_coco
+images_dir: coco/images
+annotations_dir: coco/converted/annotations
+train_json: train.json
+val_json: val.json
+summary_json: coco/converted/summary.json

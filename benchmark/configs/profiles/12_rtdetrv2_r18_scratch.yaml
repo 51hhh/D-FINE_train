@@ -1,0 +1,17 @@
+# 从零训练对照（A组）: RT-DETRv2-R18，不加载backbone预训练，不加载检测预训练
+stage: "C_scratch_control"
+purpose: "验证 RT-DETRv2-R18 在本数据集上的预训练收益"
+compare_with: "02_rtdetrv2_r18_coco_pretrain.yaml"
+next_if_better: "若优于预训练，可减少预训练依赖"
+profile_name: rtdetrv2_r18_scratch
+model_type: rtdetr_lyu
+repo_dir: third_party/RT-DETR/rtdetrv2_pytorch
+base_config: configs/rtdetrv2/rtdetrv2_r18vd_120e_coco.yml
+epochs: 120
+seed: 0
+device: "0"
+use_amp: true
+pretrained: ""
+output_group: scratch_rtdetr_r18
+overrides:
+  PResNet.pretrained: false

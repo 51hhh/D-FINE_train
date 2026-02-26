@@ -1,0 +1,61 @@
+# =========================
+# Python cache / build
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Virtual env
+# =========================
+.venv/
+venv/
+env/
+
+# =========================
+# Dataset and raw assets
+# =========================
+coco/images/
+coco/Annotations/
+coco/converted/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.mp4
+*.avi
+*.mov
+
+# =========================
+# Model weights / checkpoints
+# =========================
+*.pth
+*.pt
+*.onnx
+*.engine
+*.trt
+benchmark/pretrained/
+
+# =========================
+# Training / eval outputs
+# =========================
+benchmark/experiments/
+benchmark/evaluations/
+benchmark/results/
+benchmark/generated/
+runs/
+output/
+logs/
+events.out.tfevents*
+
+# =========================
+# OS / editor
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

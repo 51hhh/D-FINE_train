@@ -1,0 +1,16 @@
+# 预训练策略对照（可选）: D-FINE-S 使用 Objects365 体系配置做微调
+stage: "E_pretrain_strategy"
+purpose: "对比 COCO 预训练 vs Objects365 路线"
+compare_with: "03_dfine_s_coco_pretrain.yaml"
+next_if_better: "若小目标召回提升且抖动不恶化，可转向 Objects365 路线"
+profile_name: dfine_s_obj365_finetune
+model_type: dfine
+repo_dir: third_party/D-FINE
+base_config: configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml
+seed: 0
+device: "0"
+use_amp: true
+pretrained: "benchmark/pretrained/dfine/dfine_s_obj2coco.pth" # 已下载（Objects365+COCO）
+output_group: ext_dfine_s_obj365
+overrides:
+  HGNetv2.pretrained: false

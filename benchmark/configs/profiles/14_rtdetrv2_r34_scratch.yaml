@@ -1,0 +1,17 @@
+# 从零训练对照（B组）: RT-DETRv2-R34
+stage: "C_scratch_control"
+purpose: "验证 RT-DETRv2-R34 的预训练收益"
+compare_with: "04_rtdetrv2_r34_coco_pretrain.yaml"
+next_if_better: "若优于预训练，可简化训练流程"
+profile_name: rtdetrv2_r34_scratch
+model_type: rtdetr_lyu
+repo_dir: third_party/RT-DETR/rtdetrv2_pytorch
+base_config: configs/rtdetrv2/rtdetrv2_r34vd_120e_coco.yml
+epochs: 120
+seed: 0
+device: "0"
+use_amp: true
+pretrained: ""
+output_group: scratch_rtdetr_r34
+overrides:
+  PResNet.pretrained: false

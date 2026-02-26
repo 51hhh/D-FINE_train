@@ -1,0 +1,17 @@
+# 扩展组（可选）: RT-DETRv2-R50 预训练微调
+stage: "D_extended"
+purpose: "验证 RT-DETR 中等偏大模型上限"
+compare_with: "04_rtdetrv2_r34_coco_pretrain.yaml"
+next_if_better: "可作为最终候选部署模型"
+profile_name: rtdetrv2_r50_coco_pretrain
+model_type: rtdetr_lyu
+repo_dir: third_party/RT-DETR/rtdetrv2_pytorch
+base_config: configs/rtdetrv2/rtdetrv2_r50vd_6x_coco.yml
+epochs: 120
+seed: 0
+device: "0"
+use_amp: true
+pretrained: "benchmark/pretrained/rtdetr/rtdetrv2_r50vd_6x_coco_ema.pth" # 已下载
+output_group: ext_rtdetr_r50_pretrain
+overrides:
+  PResNet.pretrained: true
