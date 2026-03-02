@@ -18,7 +18,7 @@ import torchvision.transforms as transforms
 import tqdm
 from fiftyone import ViewField as F
 from PIL import Image
-
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.core import YAMLConfig
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))

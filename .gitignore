@@ -59,3 +59,6 @@ events.out.tfevents*
 Thumbs.db
 .idea/
 .vscode/
+
+
+coco.zip

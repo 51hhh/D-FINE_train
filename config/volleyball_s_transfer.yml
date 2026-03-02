@@ -1,0 +1,145 @@
+# 单目标 volleyball 实验配置：S 模型 + Objects365 预训练迁移
+# 用法（在 D-FINE 目录下执行）：
+# python train.py -c ../config/volleyball_s_transfer.yml --use-amp --seed 0 -t weights/dfine_s_obj365.pth
+
+__include__: [
+  '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
+]
+
+# 实验输出目录（相对 D-FINE 工作目录）
+output_dir: ./output/exp_s_transfer_aug
+
+# 数据集设置：单类别，且不做 COCO80 类别重映射
+num_classes: 1
+remap_mscoco_category: False
+
+# ============ 数据增强配置 ============
+# 启用更激进的数据增强来改进小数据集性能
+train_dataloader:
+  collate_fn:
+    # 多尺度训练
+    base_size: 640
+    base_size_repeat: 10
+    stop_epoch: 56
+    ema_restart_decay: 0.9999
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+    return_masks: False
+    # 强化的数据增强管道
+    transforms:
+      type: Compose
+      ops:
+        # 1. 光度失真（亮度、对比度、饱和度）
+        - type: RandomPhotometricDistort
+          p: 0.7  # 70% 概率应用
+        
+        # 2. 随机扩展（缩放扩展）
+        - type: RandomZoomOut
+          p: 0.2
+          fill: 0
+        
+        # 3. 随机 IoU 裁切（对象中心裁切）
+        - type: RandomIoUCrop
+          p: 0.8  # 80% 概率应用，有助于小对象检测
+        
+        # 4. 清理边界框
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        
+        # 5. 随机水平翻转
+        - type: RandomHorizontalFlip
+          p: 0.5
+        
+        # 6. 随机竖直翻转（排球检测中有用）
+        - type: RandomVerticalFlip
+          p: 0.3
+        
+        # 7. 调整到固定尺寸
+        - type: Resize
+          size: [640, 640]
+        
+        # 8. 再次清理边界框
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        
+        # 9. 转换为张量
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        
+        # 10. 转换边界框格式
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+      
+      policy:
+        name: stop_epoch
+        epoch: 56
+        ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
+    type: CocoDetection
+  drop_last: True
+  num_workers: 4
+  shuffle: True
+  total_batch_size: 32
+  type: DataLoader
+
+train_dataloader:
+  dataset:
+    # 训练图像目录
+    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    # 训练标注（COCO 格式）
+    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+
+val_dataloader:
+  collate_fn:
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/val.json
+    return_masks: False
+    # 验证集使用最小增强
+    transforms:
+      type: Compose
+      ops:
+        # 只进行必需的变换，不做随机增强
+        - type: Resize
+          size: [640, 640]
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+    type: CocoDetection
+  drop_last: False
+  num_workers: 4
+  shuffle: False
+  total_batch_size: 64
+  type: DataLoader
+
+# 每 N 轮额外保存一次 checkpointxxxx.pth（last/best 仍会按训练逻辑保存）
+checkpoint_freq: 6  # 从12改为6，保存更频繁
+
+# 训练总轮次
+epochs: 160  # 从120增加到160，更长的训练
+
+# ========== 额外优化参数 ==========
+# 学习率预热
+lr_warmup_scheduler:
+  type: LinearWarmup
+  warmup_duration: 500  # 预热500步
+
+# EMA模型平滑
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  start: 0
+  warmups: 2000
+
+# 梯度裁减
+clip_max_norm: 0.1
+
+# 同步批归一化（多卡训练）
+sync_bn: True

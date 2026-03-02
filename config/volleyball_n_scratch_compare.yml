@@ -1,0 +1,52 @@
+# 单目标 volleyball：N 模型从零训练对照组（用于比较预训练收益）
+# 用法（在 D-FINE 目录下）：
+# python train.py -c ../config/volleyball_n_scratch_compare.yml --use-amp --seed 0
+
+__include__: [
+  '../D-FINE/configs/dfine/custom/dfine_hgnetv2_n_custom.yml',
+]
+
+output_dir: ./output/exp_n_scratch_compare
+
+num_classes: 1
+remap_mscoco_category: False
+
+# 从零训练关键
+HGNetv2:
+  pretrained: False
+
+# 从零训练通常需要更长训练
+epochs: 160
+checkpoint_freq: 5
+
+# 与 N 快速组对齐输入尺寸，便于公平对比
+eval_spatial_size: [512, 512]
+
+train_dataloader:
+  total_batch_size: 64
+  dataset:
+    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [512, 512], }
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+  collate_fn:
+    base_size: 512
+
+val_dataloader:
+  total_batch_size: 128
+  dataset:
+    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/val.json
+    transforms:
+      ops:
+        - {type: Resize, size: [512, 512], }
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
