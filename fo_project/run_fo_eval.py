@@ -18,7 +18,7 @@ from tqdm import tqdm
 SETTINGS = {
     "repo_dir": "./D-FINE",
     "config": "./config/volleyball_s_transfer.yml",
-    "checkpoint": "./D-FINE/output/exp_s_transfer_aug/best_stg1.pth",  # 最新的最佳权重
+    "checkpoint": "./D-FINE/output/exp_s_transfer_obj2coco_aug/best_stg1.pth",  # 最新的最佳权重
     "img_root": "./coco/images",
     "ann_file": "./coco/converted/annotations/val.json",
     "dataset_name": "volleyball-val-s-b1",

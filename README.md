@@ -299,3 +299,14 @@ python -c "import json,pathlib; p=pathlib.Path('output/exp_s_transfer_balance/lo
 2. 输出目录中存在 `best_stg2.pth`（或 `best_stg1.pth`）和 `log.txt`
 3. 用 `--test-only` 跑一次验证，确认最终指标并记录到实验表
 
+
+
+## 快速开始
+cd D-FINE
+
+python train.py -c ../config/volleyball_s_transfer_balance.yml --use-amp --seed 0 -t weights/dfine_s_obj365.pth
+python train.py -c ../config/volleyball_s_transfer.yml --use-amp --seed 0 -r output/exp_s_transfer/last.pth
+
++ -c 接config配置文件路径
+ + -t 从预训练模型路径迁移tuning
+ + -r 从last模型开始继续训练resume

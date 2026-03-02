@@ -1,3 +1,6 @@
+conda activate fiftyone
+python fo_project/run_fo_eval.py
+
 # FiftyOne 简化评估项目（独立于 D-FINE）
 
 这个目录提供一个精简版流程：  
