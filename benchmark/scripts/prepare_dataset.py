@@ -140,7 +140,7 @@ def main():
     if not samples:
         raise RuntimeError("No valid samples generated")
 
-    cls2id = {name: i + 1 for i, name in enumerate(sorted(cls_names))}
+    cls2id = {name: i for i, name in enumerate(sorted(cls_names))}
 
     random.Random(SETTINGS["seed"]).shuffle(samples)
     n = len(samples)

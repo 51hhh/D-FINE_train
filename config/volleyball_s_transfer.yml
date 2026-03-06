@@ -24,8 +24,8 @@ train_dataloader:
     ema_restart_decay: 0.9999
     type: BatchImageCollateFunction
   dataset:
-    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
-    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/train.json
     return_masks: False
     # 强化的数据增强管道
     transforms:
@@ -88,16 +88,16 @@ train_dataloader:
 train_dataloader:
   dataset:
     # 训练图像目录
-    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
+    img_folder: ../coco/images
     # 训练标注（COCO 格式）
-    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+    ann_file: ../coco/converted/annotations/train.json
 
 val_dataloader:
   collate_fn:
     type: BatchImageCollateFunction
   dataset:
-    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
-    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/val.json
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/val.json
     return_masks: False
     # 验证集使用最小增强
     transforms:

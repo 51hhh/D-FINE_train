@@ -1,0 +1,8 @@
+faster-coco-eval>=1.6.6
+PyYAML
+tensorboard
+scipy
+calflops
+transformers
+loguru
+opencv-python
