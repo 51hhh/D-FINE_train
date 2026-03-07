@@ -52,7 +52,7 @@ def check_matching():
     print("=" * 50)
     
     # 获取所有图片和XML的基础名
-    image_names = get_base_names(img_dir, '.jpg')
+    image_names = get_base_names(img_dir, ('.png', '.jpg'))
     xml_names = get_base_names(xml_dir, '.xml')
     
     # 找出没有匹配上的

@@ -7,7 +7,7 @@ __include__: [
 ]
 
 # 实验输出目录（相对 D-FINE 工作目录）
-output_dir: ./output/exp_s_transfer_obj_aug
+output_dir: ./output/exp_s_transfer_objtococo_aug_2000
 
 # 数据集设置：单类别，且不做 COCO80 类别重映射
 num_classes: 1
