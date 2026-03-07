@@ -28,69 +28,65 @@ train_dataloader:
     ann_file: ../coco/converted/annotations/train.json
     return_masks: False
     # 强化的数据增强管道
-    transforms:
-      type: Compose
-      ops:
-        # 1. 光度失真（亮度、对比度、饱和度）
-        - type: RandomPhotometricDistort
-          p: 0.7  # 70% 概率应用
+    # transforms:
+    #   type: Compose
+    #   ops:
+    #     # 1. 光度失真（亮度、对比度、饱和度）
+    #     - type: RandomPhotometricDistort
+    #       p: 0.7  # 70% 概率应用
         
-        # 2. 随机扩展（缩放扩展）
-        - type: RandomZoomOut
-          p: 0.2
-          fill: 0
+    #     # 2. 随机扩展（缩放扩展）
+    #     - type: RandomZoomOut
+    #       p: 0.2
+    #       fill: 0
         
-        # 3. 随机 IoU 裁切（对象中心裁切）
-        - type: RandomIoUCrop
-          p: 0.8  # 80% 概率应用，有助于小对象检测
+    #     # 3. 随机 IoU 裁切（对象中心裁切）
+    #     - type: RandomIoUCrop
+    #       p: 0.8  # 80% 概率应用，有助于小对象检测
         
-        # 4. 清理边界框
-        - type: SanitizeBoundingBoxes
-          min_size: 1
+    #     # 4. 清理边界框
+    #     - type: SanitizeBoundingBoxes
+    #       min_size: 1
         
-        # 5. 随机水平翻转
-        - type: RandomHorizontalFlip
-          p: 0.5
+    #     # 5. 随机水平翻转
+    #     - type: RandomHorizontalFlip
+    #       p: 0.5
         
-        # 6. 随机竖直翻转（排球检测中有用）
-        - type: RandomVerticalFlip
-          p: 0.3
+    #     # 6. 随机竖直翻转（排球检测中有用）
+    #     - type: RandomVerticalFlip
+    #       p: 0.3
         
-        # 7. 调整到固定尺寸
-        - type: Resize
-          size: [640, 640]
+    #     # 7. 调整到固定尺寸
+    #     - type: Resize
+    #       size: [640, 640]
         
-        # 8. 再次清理边界框
-        - type: SanitizeBoundingBoxes
-          min_size: 1
+    #     # 8. 再次清理边界框
+    #     - type: SanitizeBoundingBoxes
+    #       min_size: 1
         
-        # 9. 转换为张量
-        - type: ConvertPILImage
-          dtype: float32
-          scale: True
+    #     # 9. 转换为张量
+    #     - type: ConvertPILImage
+    #       dtype: float32
+    #       scale: True
         
-        # 10. 转换边界框格式
-        - type: ConvertBoxes
-          fmt: cxcywh
-          normalize: True
+    #     # 10. 转换边界框格式
+    #     - type: ConvertBoxes
+    #       fmt: cxcywh
+    #       normalize: True
       
-      policy:
-        name: stop_epoch
-        epoch: 56
-        ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
+    #   policy:
+    #     name: stop_epoch
+    #     epoch: 56
+    #     ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
+
+
     type: CocoDetection
   drop_last: True
-  num_workers: 4
+  num_workers: 36
   shuffle: True
   total_batch_size: 32
   type: DataLoader
 
-train_dataloader:
-  dataset:
-    # 训练图像目录
-    img_folder: ../coco/images
-    # 训练标注（COCO 格式）
-    ann_file: ../coco/converted/annotations/train.json
 
 val_dataloader:
   collate_fn:
@@ -114,7 +110,7 @@ val_dataloader:
           normalize: True
     type: CocoDetection
   drop_last: False
-  num_workers: 4
+  num_workers: 12
   shuffle: False
   total_batch_size: 64
   type: DataLoader
