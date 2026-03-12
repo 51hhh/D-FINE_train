@@ -26,8 +26,8 @@ eval_spatial_size: [512, 512]
 train_dataloader:
   total_batch_size: 64
   dataset:
-    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
-    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/train.json
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/train.json
     transforms:
       ops:
         - {type: RandomPhotometricDistort, p: 0.5}
@@ -45,9 +45,10 @@ train_dataloader:
 val_dataloader:
   total_batch_size: 128
   dataset:
-    img_folder: C:/Users/Rick/Desktop/python/ObjectDetection/coco/images
-    ann_file: C:/Users/Rick/Desktop/python/ObjectDetection/coco/converted/annotations/val.json
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/val.json
     transforms:
       ops:
         - {type: Resize, size: [512, 512], }
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}

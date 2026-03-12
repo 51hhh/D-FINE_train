@@ -138,4 +138,4 @@ ema:
 clip_max_norm: 0.1
 
 # 同步批归一化（多卡训练）
-sync_bn: True
+sync_bn: False
