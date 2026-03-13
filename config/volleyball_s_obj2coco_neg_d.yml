@@ -1,48 +1,46 @@
-# 困难负样本微调配置：基于 best_stg1.pth 继续训练
-# 用法：python train.py -c ../config/volleyball_s_finetune_negatives.yml --use-amp --seed 0 -r output/exp_s_transfer_aug/best_stg1.pth
+# obj2coco pretrained, negative images (A) + DN random background queries (D)
+# 单目标 volleyball 实验配置：S 模型 + Objects365 预训练迁移 + A+D
+# 用法（在 D-FINE 目录下执行）：
+# python train.py -c ../config/volleyball_s_obj2coco_neg_d.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
 
 __include__: [
   '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
 ]
 
-# 新的输出目录
-output_dir: ./output/exp_s_finetune_neg
+output_dir: ./output/exp_s_obj2coco_neg_d
 
-# 数据集设置
 num_classes: 1
 remap_mscoco_category: False
 
-# ============ 方案 D: DN 随机背景负样本 ============
-# num_neg_random: 每张图注入的随机背景框数量 (0=关闭)
-# neg_iou_threshold: 与 GT 的 IoU 过滤阈值
+# ============ Method D: DN random background queries ============
 DFINETransformer:
   num_neg_random: 50
   neg_iou_threshold: 0.3
 
-# ============ 使用带负样本的训练集 ============
+# ============ Train dataloader ============
 train_dataloader:
   collate_fn:
     base_size: 640
     base_size_repeat: 10
-    stop_epoch: 30  # 微调轮次较少
+    stop_epoch: 56
     ema_restart_decay: 0.9999
     type: BatchImageCollateFunction
   dataset:
     img_folder: ../coco/images
-    # 使用包含负样本的训练集
     ann_file: ../coco/converted/annotations/train_with_negatives.json
     return_masks: False
     transforms:
       type: Compose
       ops:
         - type: RandomPhotometricDistort
-          p: 0.5  # 微调时降低增强强度
-        - type: RandomIoUCrop
           p: 0.5
+        - type: RandomZoomOut
+          fill: 0
+        - type: RandomIoUCrop
+          p: 0.8
         - type: SanitizeBoundingBoxes
           min_size: 1
         - type: RandomHorizontalFlip
-          p: 0.5
         - type: Resize
           size: [640, 640]
         - type: SanitizeBoundingBoxes
@@ -55,11 +53,11 @@ train_dataloader:
           normalize: True
       policy:
         name: stop_epoch
-        epoch: 30
-        ops: [RandomPhotometricDistort, RandomIoUCrop]
+        epoch: 56
+        ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
     type: CocoDetection
   drop_last: True
-  num_workers: 4
+  num_workers: 36
   shuffle: True
   total_batch_size: 32
   type: DataLoader
@@ -71,6 +69,7 @@ val_dataloader:
     img_folder: ../coco/images
     ann_file: ../coco/converted/annotations/val.json
     return_masks: False
+    # 验证集使用最小增强
     transforms:
       type: Compose
       ops:
@@ -84,33 +83,24 @@ val_dataloader:
           normalize: True
     type: CocoDetection
   drop_last: False
-  num_workers: 4
+  num_workers: 12
   shuffle: False
   total_batch_size: 64
   type: DataLoader
 
-# 微调参数
-checkpoint_freq: 3
-epochs: 30  # 微调不需要太多轮
-
-# 更小的学习率用于微调
-optimizer:
-  type: AdamW
-  lr: 0.00005  # 降低5倍
-  betas: [0.9, 0.999]
-  weight_decay: 0.000125
-  params:
-    - params: '^(?=.*backbone)(?!.*norm|bn).*$'
-      lr: 0.000025  # backbone 更小
-    - params: '^(?=.*backbone)(?=.*norm|bn).*$'
-      lr: 0.000025
-      weight_decay: 0.0
-    - params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
-      weight_decay: 0.0
+# 每 N 轮额外保存一次 checkpointxxxx.pth（last/best 仍会按训练逻辑保存）
+checkpoint_freq: 12
+epochs: 160
 
 lr_warmup_scheduler:
   type: LinearWarmup
-  warmup_duration: 100  # 短预热
+  warmup_duration: 500
+
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  start: 0
+  warmups: 2000
 
 clip_max_norm: 0.1
 sync_bn: False

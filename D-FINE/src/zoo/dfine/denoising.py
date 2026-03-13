@@ -4,7 +4,7 @@ Modifications Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
 
 import torch
 
-from .box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
+from .box_ops import box_cxcywh_to_xyxy, box_iou, box_xyxy_to_cxcywh
 from .utils import inverse_sigmoid
 
 
@@ -16,6 +16,8 @@ def get_contrastive_denoising_training_group(
     num_denoising=100,
     label_noise_ratio=0.5,
     box_noise_scale=1.0,
+    num_neg_random=0,
+    neg_iou_threshold=0.3,
 ):
     """cnd"""
     if num_denoising <= 0:
@@ -72,13 +74,6 @@ def get_contrastive_denoising_training_group(
         rand_sign = torch.randint_like(input_query_bbox, 0, 2) * 2.0 - 1.0
         rand_part = torch.rand_like(input_query_bbox)
         rand_part = (rand_part + 1.0) * negative_gt_mask + rand_part * (1 - negative_gt_mask)
-        # shrink_mask = torch.zeros_like(rand_sign)
-        # shrink_mask[:, :, :2] = (rand_sign[:, :, :2] == 1)  # rand_sign == 1 → (x1, y1) ↘ →  smaller bbox
-        # shrink_mask[:, :, 2:] = (rand_sign[:, :, 2:] == -1)  # rand_sign == -1 →  (x2, y2) ↖ →  smaller bbox
-        # mask = rand_part > (upper_bound / (upper_bound+1))
-        # # this is to make sure the dn bbox can be reversed to the original bbox by dfine head.
-        # rand_sign = torch.where((shrink_mask * (1 - negative_gt_mask) * mask).bool(), \
-        #                         rand_sign * upper_bound / (upper_bound+1) / rand_part, rand_sign)
         known_bbox += rand_sign * rand_part * diff
         known_bbox = torch.clip(known_bbox, min=0.0, max=1.0)
         input_query_bbox = box_xyxy_to_cxcywh(known_bbox)
@@ -86,6 +81,32 @@ def get_contrastive_denoising_training_group(
         input_query_bbox_unact = inverse_sigmoid(input_query_bbox)
 
     input_query_logits = class_embed(input_query_class)
+
+    # --- Method D: random background DN queries ---
+    num_denoising_orig = num_denoising
+    if num_neg_random > 0:
+        rand_cx = torch.rand(bs, num_neg_random, 1, device=device)
+        rand_cy = torch.rand(bs, num_neg_random, 1, device=device)
+        rand_w = torch.rand(bs, num_neg_random, 1, device=device) * 0.23 + 0.02
+        rand_h = torch.rand(bs, num_neg_random, 1, device=device) * 0.23 + 0.02
+        rand_boxes = torch.cat([rand_cx, rand_cy, rand_w, rand_h], dim=-1)
+
+        # Filter boxes overlapping with GT
+        for b in range(bs):
+            if num_gts[b] > 0:
+                gt_xyxy = box_cxcywh_to_xyxy(targets[b]["boxes"])
+                rand_xyxy = box_cxcywh_to_xyxy(rand_boxes[b])
+                iou_matrix, _ = box_iou(rand_xyxy, gt_xyxy)
+                max_iou = iou_matrix.max(dim=1)[0]
+                rand_boxes[b][max_iou >= neg_iou_threshold] = 0
+
+        rand_labels = torch.full([bs, num_neg_random], num_classes, dtype=torch.int32, device=device)
+        rand_logits = class_embed(rand_labels)
+        rand_bbox_unact = inverse_sigmoid(rand_boxes.clamp(min=1e-6, max=1 - 1e-6))
+
+        input_query_logits = torch.cat([input_query_logits, rand_logits], dim=1)
+        input_query_bbox_unact = torch.cat([input_query_bbox_unact, rand_bbox_unact], dim=1)
+        num_denoising = num_denoising + num_neg_random
 
     tgt_size = num_denoising + num_queries
     attn_mask = torch.full([tgt_size, tgt_size], False, dtype=torch.bool, device=device)
@@ -97,25 +118,28 @@ def get_contrastive_denoising_training_group(
         if i == 0:
             attn_mask[
                 max_gt_num * 2 * i : max_gt_num * 2 * (i + 1),
-                max_gt_num * 2 * (i + 1) : num_denoising,
+                max_gt_num * 2 * (i + 1) : num_denoising_orig,
             ] = True
         if i == num_group - 1:
             attn_mask[max_gt_num * 2 * i : max_gt_num * 2 * (i + 1), : max_gt_num * i * 2] = True
         else:
             attn_mask[
                 max_gt_num * 2 * i : max_gt_num * 2 * (i + 1),
-                max_gt_num * 2 * (i + 1) : num_denoising,
+                max_gt_num * 2 * (i + 1) : num_denoising_orig,
             ] = True
             attn_mask[max_gt_num * 2 * i : max_gt_num * 2 * (i + 1), : max_gt_num * 2 * i] = True
+
+    # Random background queries: isolate from original DN, visible to each other
+    if num_neg_random > 0:
+        bg_start = num_denoising_orig
+        bg_end = num_denoising
+        attn_mask[bg_start:bg_end, :num_denoising_orig] = True
+        attn_mask[:num_denoising_orig, bg_start:bg_end] = True
 
     dn_meta = {
         "dn_positive_idx": dn_positive_idx,
         "dn_num_group": num_group,
         "dn_num_split": [num_denoising, num_queries],
     }
-
-    # print(input_query_class.shape) # torch.Size([4, 196, 256])
-    # print(input_query_bbox.shape) # torch.Size([4, 196, 4])
-    # print(attn_mask.shape) # torch.Size([496, 496])
 
     return input_query_logits, input_query_bbox_unact, attn_mask, dn_meta

@@ -487,6 +487,8 @@ class DFINETransformer(nn.Module):
         reg_max=32,
         reg_scale=4.0,
         layer_scale=1,
+        num_neg_random=0,
+        neg_iou_threshold=0.3,
     ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -556,6 +558,8 @@ class DFINETransformer(nn.Module):
         self.num_denoising = num_denoising
         self.label_noise_ratio = label_noise_ratio
         self.box_noise_scale = box_noise_scale
+        self.num_neg_random = num_neg_random
+        self.neg_iou_threshold = neg_iou_threshold
         if num_denoising > 0:
             self.denoising_class_embed = nn.Embedding(
                 num_classes + 1, hidden_dim, padding_idx=num_classes
@@ -852,6 +856,8 @@ class DFINETransformer(nn.Module):
                     num_denoising=self.num_denoising,
                     label_noise_ratio=self.label_noise_ratio,
                     box_noise_scale=1.0,
+                    num_neg_random=self.num_neg_random,
+                    neg_iou_threshold=self.neg_iou_threshold,
                 )
             )
         else:
