@@ -433,6 +433,24 @@ class DFINECriterion(nn.Module):
                     l_dict = {k + "_dn_pre": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
+        # --- Patch: Issue #247 空标注 batch 安全补丁 ---
+        # 当 batch 中所有图片都是空标注时，DN loss 的 key 可能缺失。
+        # 动态补齐所有预期的 DN loss key，防止多卡 reduce_dict 死锁和日志记录异常。
+        if "dn_outputs" in outputs:
+            device = outputs['pred_logits'].device
+            num_dn_layers = len(outputs["dn_outputs"])
+            base_loss_names = [k for k in self.weight_dict.keys()]
+            for i in range(num_dn_layers):
+                for name in base_loss_names:
+                    key = f"{name}_dn_{i}"
+                    if key not in losses:
+                        losses[key] = torch.tensor(0.0, device=device)
+            if "dn_pre_outputs" in outputs:
+                for name in base_loss_names:
+                    key = f"{name}_dn_pre"
+                    if key not in losses:
+                        losses[key] = torch.tensor(0.0, device=device)
+
         # For debugging Objects365 pre-train.
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
         return losses
