@@ -34,12 +34,14 @@ from PIL import Image
 SETTINGS = {
     "repo_dir": "./D-FINE",
     "config": "./config/volleyball_s_transfer.yml",
-    "checkpoint": "./best_stg2.pth",
-    "device": "cuda:0",
+    "checkpoint": "E:/数据集/model/exp_s_finetune_neg_aug.pth",
+    "device": "cpu",
     "input_size": 640,
 
     # 负样本图片目录 (无排球的场景图片)
-    "negative_img_dir": "./coco/images/negative_samples",
+    # "negative_img_dir": "./coco/images/negative_samples",
+    "negative_img_dir": "E:/数据集/negative_samples",
+
 
     # 标准 val 集 (用于 mAP)
     "val_ann_file": "./coco/converted/annotations/val.json",
@@ -396,8 +398,8 @@ def print_report(oa_metrics, map_metrics, cfg):
     print("=" * 60)
 
 
-def save_histogram(all_scores, output_dir: Path, thresholds: list):
-    """保存置信度分布直方图。"""
+def save_histogram(all_scores, output_dir: Path, thresholds: list, per_image=None):
+    """保存置信度分布直方图（两张子图）。"""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -409,17 +411,51 @@ def save_histogram(all_scores, output_dir: Path, thresholds: list):
     if not all_scores:
         return
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(all_scores, bins=50, range=(0, 1), color="steelblue", edgecolor="white", alpha=0.8)
+    # 每张图的最高分数（真正反映误检严重程度的指标）
+    max_scores = [img["max_score"] for img in per_image] if per_image else []
+    # 过滤掉接近 0 的噪声分数，只看有意义的误检
+    significant_scores = [s for s in all_scores if s >= 0.1]
 
-    for t in thresholds:
-        ax.axvline(x=t, color="red", linestyle="--", alpha=0.6, label=f"threshold={t}")
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-    ax.set_xlabel("Detection Confidence Score", fontsize=12)
-    ax.set_ylabel("Count", fontsize=12)
-    ax.set_title("Confidence Distribution on Negative Images\n(All detections, no ground truth objects)", fontsize=13)
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
+    # 左图：每张图的最高置信度分布（最关键的指标）
+    ax1 = axes[0]
+    if max_scores:
+        ax1.hist(max_scores, bins=30, range=(0, 1), color="#e74c3c", edgecolor="white", alpha=0.85)
+        for t in thresholds:
+            ax1.axvline(x=t, color="navy", linestyle="--", alpha=0.7, label=f"threshold={t}")
+        above_05 = sum(1 for s in max_scores if s >= 0.5)
+        above_07 = sum(1 for s in max_scores if s >= 0.7)
+        ax1.set_title(
+            f"Per-Image Max Confidence (N={len(max_scores)})\n"
+            f"{above_05} images with max>0.5, {above_07} images with max>0.7",
+            fontsize=12,
+        )
+    ax1.set_xlabel("Max Detection Score per Image", fontsize=11)
+    ax1.set_ylabel("Number of Images", fontsize=11)
+    ax1.legend(fontsize=9)
+    ax1.grid(axis="y", alpha=0.3)
+
+    # 右图：所有有意义的检测分数（>= 0.1）
+    ax2 = axes[1]
+    if significant_scores:
+        ax2.hist(significant_scores, bins=40, range=(0.1, 1), color="steelblue", edgecolor="white", alpha=0.85)
+        for t in thresholds:
+            ax2.axvline(x=t, color="red", linestyle="--", alpha=0.7, label=f"threshold={t}")
+        ax2.set_title(
+            f"All Detections with Score >= 0.1 (N={len(significant_scores)})\n"
+            f"(Filtered from {len(all_scores)} total query outputs)",
+            fontsize=12,
+        )
+    else:
+        ax2.set_title("No detections above 0.1", fontsize=12)
+    ax2.set_xlabel("Detection Confidence Score", fontsize=11)
+    ax2.set_ylabel("Count", fontsize=11)
+    ax2.legend(fontsize=9)
+    ax2.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("D-FINE Query Over-Activation Analysis (Negative Images)", fontsize=14, fontweight="bold")
+    fig.tight_layout()
 
     hist_path = output_dir / "confidence_histogram.png"
     fig.savefig(str(hist_path), dpi=150, bbox_inches="tight")
@@ -546,7 +582,7 @@ def main():
         save_per_image_csv(per_image, output_dir, cfg["conf_thresholds"])
 
     if cfg["save_histograms"] and all_scores:
-        save_histogram(all_scores, output_dir, cfg["conf_thresholds"])
+        save_histogram(all_scores, output_dir, cfg["conf_thresholds"], per_image)
 
     print("\n评估完成。")
 
