@@ -310,3 +310,101 @@ python train.py -c ../config/volleyball_s_transfer.yml --use-amp --seed 0 -r out
 + -c 接config配置文件路径
  + -t 从预训练模型路径迁移tuning
  + -r 从last模型开始继续训练resume
+
+---
+
+## 11. Over-Activation 误检抑制：新增参数与 TensorBoard 指标
+
+### 11.1 背景
+
+D-FINE 等 DETR 系列模型在单类微调时容易出现 **Query Over-Activation** 问题：预训练的 300 条 query 在单类任务下退化为"是否有目标"的二元分类器，导致对任何物体都以高置信度误检。
+
+本项目通过以下机制抑制该问题：
+- **Method A**：训练集中加入空标注负样本图片
+- **Method D**：DN 随机负框（每张图注入 50-100 个随机背景框）
+- **bg_loss_weight**：放大背景查询的 VFL loss 权重
+
+---
+
+### 11.2 配置方式（YAML）
+
+在实验配置文件中添加以下参数（不声明则默认关闭，对训练零影响）：
+
+```yaml
+# 背景 loss 权重（默认 1.0，建议 2.0）
+DFINECriterion:
+  bg_loss_weight: 2.0
+
+# 训练验证时自动评估 Over-Activation 指标
+eval_overactivation: True
+negative_img_dir: "../coco/images/negative_samples"  # 负样本图片目录
+oa_conf_threshold: 0.3                               # 评估阈值，默认 0.3
+```
+
+参考配置文件：`config/volleyball_s_obj2coco_neg_d_bg2.yml`
+
+---
+
+### 11.3 TensorBoard 指标说明
+
+开启 `eval_overactivation: True` 后，每轮验证后会在 TensorBoard 中出现以下三个指标：
+
+#### `Test/oa_fppi` — False Positives Per Image
+
+**每张负样本图的平均误检数**（置信度 >= `oa_conf_threshold`）
+
+| 值 | 含义 |
+|---|---|
+| 0.04 | 100 张背景图共 4 个误检，几乎无误检（生产级） |
+| 2.15 | 100 张背景图共 215 个误检，严重过激活 |
+
+- 值域：0 → ∞
+- 理想值：< 0.05
+- 趋势期望：随训练**持续下降**
+
+#### `Test/oa_clean_rate` — Clean Image Rate
+
+**完全无误检的负样本图片比例**
+
+| 值 | 含义 |
+|---|---|
+| 0.96 | 100 张中 96 张完全干净，4 张有误检 |
+| 0.00 | 所有图片都有至少一个误检（最差情况） |
+
+- 值域：0.0 → 1.0
+- 理想值：> 0.95
+- 趋势期望：随训练**持续上升**
+
+#### `Test/oa_max_score` — Max Detection Score
+
+**所有负样本图中最高的单个误检置信度**
+
+| 值 | 含义 |
+|---|---|
+| 0.417 | 最严重误检置信度 41.7%，用 0.5 阈值可完全过滤（安全） |
+| 0.930 | 最严重误检置信度 93%，模型对误检极度自信（危险） |
+
+- 值域：0.0 → 1.0
+- 理想值：< 0.5
+- 趋势期望：随训练**持续下降**
+
+---
+
+### 11.4 部署安全阈值参考
+
+```
+oa_fppi       < 0.05  → 生产级
+oa_clean_rate > 0.95  → 生产级
+oa_max_score  < 0.50  → 0.5 推理阈值可完全过滤误检
+```
+
+### 11.5 各模型指标对比（实验记录）
+
+| 模型 | 预训练 | 负样本 | Method D | FPPI@0.3 | Clean@0.3 | Max FP |
+|------|--------|--------|---------|----------|-----------|--------|
+| transfer_aug_2000 | obj365 | 否 | 否 | 2.149 | 0% | 0.930 |
+| transfer_objtococo_2000 | obj2coco | 否 | 否 | 1.109 | 27.7% | 0.938 |
+| finetune_neg_aug | obj365 | 是 | 否 | 2.356 | 0% | 0.885 |
+| finetune_neg_objtococo | obj2coco | 是 | 否 | 0.931 | 36.6% | 0.925 |
+| **neg_d** | obj2coco | 是 | 是 | **0.040** | **96%** | **0.417** |
+| neg_d_q100 | obj2coco | 是 | 是(q=100) | 0.050 | 99% | 0.698 |
