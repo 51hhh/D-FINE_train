@@ -34,6 +34,8 @@ coco/converted/
 # Model weights / checkpoints
 # =========================
 *.pth
+!D-FINE/weights/dfine_s_obj2coco.pth
+!D-FINE/weights/dfine_s_obj365.pth
 *.pt
 *.onnx
 *.engine
