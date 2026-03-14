@@ -14,7 +14,7 @@ import torch
 
 from ..misc import dist_utils, stats
 from ._solver import BaseSolver
-from .det_engine import evaluate, train_one_epoch
+from .det_engine import evaluate, evaluate_overactivation, train_one_epoch
 
 
 class DetSolver(BaseSolver):
@@ -116,6 +116,21 @@ class DetSolver(BaseSolver):
                 self.use_wandb,
                 output_dir=self.output_dir,
             )
+
+            if self.cfg.yaml_cfg.get("eval_overactivation", False) and dist_utils.is_main_process():
+                neg_dir = self.cfg.yaml_cfg.get("negative_img_dir", "")
+                oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
+                oa_input_size = oa_input_size[0] if isinstance(oa_input_size, (list, tuple)) else oa_input_size
+                oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+                oa_metrics = evaluate_overactivation(
+                    module, self.postprocessor, neg_dir, self.device,
+                    input_size=oa_input_size, conf_threshold=oa_threshold,
+                )
+                if oa_metrics:
+                    print(f"Over-Activation @{oa_threshold}: {oa_metrics}")
+                    if self.writer:
+                        for k, v in oa_metrics.items():
+                            self.writer.add_scalar(f"Test/{k}", v, epoch)
 
             # TODO
             for k in test_stats:
@@ -219,6 +234,18 @@ class DetSolver(BaseSolver):
             epoch=-1,
             use_wandb=False,
         )
+
+        if self.cfg.yaml_cfg.get("eval_overactivation", False) and dist_utils.is_main_process():
+            neg_dir = self.cfg.yaml_cfg.get("negative_img_dir", "")
+            oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
+            oa_input_size = oa_input_size[0] if isinstance(oa_input_size, (list, tuple)) else oa_input_size
+            oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+            oa_metrics = evaluate_overactivation(
+                module, self.postprocessor, neg_dir, self.device,
+                input_size=oa_input_size, conf_threshold=oa_threshold,
+            )
+            if oa_metrics:
+                print(f"Over-Activation @{oa_threshold}: {oa_metrics}")
 
         if self.output_dir:
             dist_utils.save_on_master(

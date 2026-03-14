@@ -8,13 +8,16 @@ Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 import math
 import sys
+from pathlib import Path
 from typing import Dict, Iterable, List
 
 import numpy as np
 import torch
 import torch.amp
+from PIL import Image
 from torch.cuda.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.transforms as T
 
 from ..data import CocoEvaluator
 from ..data.dataset import mscoco_category2label
@@ -257,3 +260,66 @@ def evaluate(
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
 
     return stats, coco_evaluator
+
+
+@torch.no_grad()
+def evaluate_overactivation(
+    model: torch.nn.Module,
+    postprocessor,
+    negative_img_dir: str,
+    device,
+    input_size: int = 640,
+    conf_threshold: float = 0.3,
+) -> Dict[str, float]:
+    """在纯负样本图片上计算 Over-Activation 指标（FPPI / Clean Rate / Max Score）。
+    仅在主进程调用，无需分布式同步。
+    """
+    img_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    neg_dir = Path(negative_img_dir)
+    if not neg_dir.exists():
+        print(f"[OA] negative_img_dir not found: {neg_dir}")
+        return {}
+
+    img_files = sorted(f for f in neg_dir.iterdir() if f.is_file() and f.suffix.lower() in img_extensions)
+    if not img_files:
+        print(f"[OA] No images found in {neg_dir}")
+        return {}
+
+    tfm = T.Compose([T.Resize((input_size, input_size)), T.ToTensor()])
+    model.eval()
+
+    total_fp = 0
+    clean_images = 0
+    max_score = 0.0
+
+    for img_path in img_files:
+        try:
+            image = Image.open(img_path).convert("RGB")
+            w, h = image.size
+            tensor = tfm(image).unsqueeze(0).to(device)
+            orig_size = torch.tensor([[w, h]], dtype=torch.float32, device=device)
+
+            outputs = model(tensor)
+            results = postprocessor(outputs, orig_size)
+
+            # 兼容 list[dict] 和 tuple 两种输出格式
+            if isinstance(results, (tuple, list)) and len(results) == 3 and torch.is_tensor(results[0]):
+                scores = results[2][0].cpu().tolist()
+            else:
+                scores = results[0]["scores"].cpu().tolist()
+
+            fp = sum(1 for s in scores if s >= conf_threshold)
+            total_fp += fp
+            if fp == 0:
+                clean_images += 1
+            if scores:
+                max_score = max(max_score, max(scores))
+        except Exception as e:
+            print(f"[OA] skip {img_path.name}: {e}")
+
+    n = len(img_files)
+    return {
+        "oa_fppi": round(total_fp / n, 4),
+        "oa_clean_rate": round(clean_images / n, 4),
+        "oa_max_score": round(max_score, 4),
+    }

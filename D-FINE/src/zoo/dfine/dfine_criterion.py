@@ -42,6 +42,7 @@ class DFINECriterion(nn.Module):
         reg_max=32,
         boxes_weight_format=None,
         share_matched_indices=False,
+        bg_loss_weight=1.0,
     ):
         """Create the criterion.
         Parameters:
@@ -64,6 +65,7 @@ class DFINECriterion(nn.Module):
         self.fgl_targets, self.fgl_targets_dn = None, None
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
+        self.bg_loss_weight = bg_loss_weight
         self.num_pos, self.num_neg = None, None
 
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
@@ -108,6 +110,11 @@ class DFINECriterion(nn.Module):
 
         pred_score = F.sigmoid(src_logits).detach()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
+
+        if self.bg_loss_weight != 1.0:
+            bg_mask = torch.ones(src_logits.shape[:2], dtype=torch.bool, device=src_logits.device)
+            bg_mask[idx] = False
+            weight[bg_mask] = weight[bg_mask] * self.bg_loss_weight
 
         loss = F.binary_cross_entropy_with_logits(
             src_logits, target_score, weight=weight, reduction="none"

@@ -1,13 +1,13 @@
 # obj2coco pretrained, negative images (A) + DN random background queries (D)
-# 单目标 volleyball 实验配置：S 模型 + Objects365 预训练迁移 + A+D
+# + bg_loss_weight=2.0（背景 VFL loss 权重 x2）+ eval_overactivation 训练中评估
 # 用法（在 D-FINE 目录下执行）：
-# python train.py -c ../config/volleyball_s_obj2coco_neg_d.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
+# python train.py -c ../config/volleyball_s_obj2coco_neg_d_bg2.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
 
 __include__: [
   '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
 ]
 
-output_dir: ./output/exp_s_obj2coco_neg_d
+output_dir: ./output/exp_s_obj2coco_neg_d_bg2
 
 num_classes: 1
 remap_mscoco_category: False
@@ -16,6 +16,15 @@ remap_mscoco_category: False
 DFINETransformer:
   num_neg_random: 100
   neg_iou_threshold: 0.2
+
+# ============ 背景 loss 权重（放大背景查询的 VFL loss 梯度）============
+DFINECriterion:
+  bg_loss_weight: 2.0
+
+# ============ Over-Activation 训练中评估 ============
+eval_overactivation: True
+negative_img_dir: "../coco/images/negative_samples"
+oa_conf_threshold: 0.3
 
 # ============ Train dataloader ============
 train_dataloader:
