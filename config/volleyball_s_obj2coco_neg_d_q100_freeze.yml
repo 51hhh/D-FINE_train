@@ -18,6 +18,9 @@ DFINETransformer:
   neg_iou_threshold: 0.3
   num_queries: 100        # 300→100，减少过激活槽位
 
+DFINEPostProcessor:
+  num_top_queries: 100    # 必须 <= num_queries
+
 # ============ 冻结 backbone ============
 HGNetv2:
   freeze_at: 3            # 冻结全部 backbone stage，保留 COCO 特征多样性
