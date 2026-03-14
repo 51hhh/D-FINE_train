@@ -6,9 +6,11 @@ Modified from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
 Copyright (c) 2023 lyuwenyu. All Rights Reserved.
 """
 
+import copy
 import datetime
 import json
 import time
+import threading
 
 import torch
 
@@ -22,6 +24,8 @@ class DetSolver(BaseSolver):
         self.train()
         args = self.cfg
         metric_names = ["AP50:95", "AP50", "AP75", "APsmall", "APmedium", "APlarge"]
+        _oa_thread = None   # 后台 OA 评估线程
+        _oa_result = {}     # 上一轮 OA 结果（在下一轮训练开始后写入 TB）
 
         if self.use_wandb:
             import wandb
@@ -122,15 +126,23 @@ class DetSolver(BaseSolver):
                 oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
                 oa_input_size = oa_input_size[0] if isinstance(oa_input_size, (list, tuple)) else oa_input_size
                 oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
-                oa_metrics = evaluate_overactivation(
-                    module, self.postprocessor, neg_dir, self.device,
-                    input_size=oa_input_size, conf_threshold=oa_threshold,
-                )
-                if oa_metrics:
-                    print(f"Over-Activation @{oa_threshold}: {oa_metrics}")
-                    if self.writer:
-                        for k, v in oa_metrics.items():
-                            self.writer.add_scalar(f"Test/{k}", v, epoch)
+                # 等待上一轮 OA 线程完成，记录结果
+                if _oa_thread is not None:
+                    _oa_thread.join()
+                    if _oa_result and self.writer:
+                        for k, v in _oa_result.items():
+                            self.writer.add_scalar(f"Test/{k}", v, epoch - 1)
+                        print(f"Over-Activation @{oa_threshold} [epoch {epoch-1}]: {_oa_result}")
+                    _oa_result.clear()
+                # 启动本轮 OA 评估（后台线程，下一轮训练开始后才等待结果）
+                _oa_model = copy.deepcopy(module).eval()
+                _oa_postprocessor = copy.deepcopy(self.postprocessor)
+                def _run_oa(_m=_oa_model, _pp=_oa_postprocessor, _nd=neg_dir,
+                            _dev=self.device, _sz=oa_input_size, _thr=oa_threshold):
+                    m = evaluate_overactivation(_m, _pp, _nd, _dev, input_size=_sz, conf_threshold=_thr)
+                    _oa_result.update(m)
+                _oa_thread = threading.Thread(target=_run_oa, daemon=True)
+                _oa_thread.start()
 
             # TODO
             for k in test_stats:
@@ -219,6 +231,14 @@ class DetSolver(BaseSolver):
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print("Training time {}".format(total_time_str))
+        # 等待最后一轮 OA 线程完成并写入 TB
+        if _oa_thread is not None:
+            _oa_thread.join()
+            if _oa_result and self.writer and dist_utils.is_main_process():
+                _final_thr = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+                for k, v in _oa_result.items():
+                    self.writer.add_scalar(f"Test/{k}", v, args.epochs - 1)
+                print(f"Over-Activation @{_final_thr} [final]: {_oa_result}")
 
     def val(self):
         self.eval()
