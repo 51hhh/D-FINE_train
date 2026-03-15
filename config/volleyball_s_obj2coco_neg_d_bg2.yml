@@ -25,7 +25,7 @@ DFINECriterion:
 eval_overactivation: True
 negative_img_dir: "../coco/images/negative_samples"
 oa_conf_threshold: 0.3
-oa_ap_tolerance: 0.005  # stg2 AP下降≤0.5%时，若OA改善则保存best_oa.pth跳过rollback
+oa_ap_min: 0.84  # AP高于此值时才对比OA并保存best_oa.pth（默认0.0=始终对比）
 
 # ============ Train dataloader ============
 train_dataloader:

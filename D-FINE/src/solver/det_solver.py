@@ -203,25 +203,23 @@ class DetSolver(BaseSolver):
                         _oa_thread = None
                     cur_oa_max = _oa_result.get("oa_max_score", _prev_oa_result.get("oa_max_score", 1.0))
                     _oa_result.clear()
-                    oa_ap_tolerance = self.cfg.yaml_cfg.get("oa_ap_tolerance", 0.0)
-                    ap_close_enough = (top1 - test_stats[k][0]) <= oa_ap_tolerance
-                    if cur_oa_max < _best_oa_max and ap_close_enough:
+                    oa_ap_min = self.cfg.yaml_cfg.get("oa_ap_min", 0.0)
+                    ap_qualified = test_stats[k][0] >= oa_ap_min
+                    if ap_qualified and cur_oa_max < _best_oa_max:
                         _best_oa_max = cur_oa_max
                         if self.output_dir and dist_utils.is_main_process():
                             dist_utils.save_on_master(
                                 self.state_dict(), self.output_dir / "best_oa.pth"
                             )
                             print(f"[OA] Saved best_oa.pth at epoch {epoch}: "
-                                  f"oa_max={cur_oa_max:.4f} (AP={test_stats[k][0]:.4f}, "
-                                  f"top1={top1:.4f}, delta={top1-test_stats[k][0]:.4f})")
-                    else:
-                        best_stat = {
-                            "epoch": -1,
-                        }
-                        if self.ema:
-                            self.ema.decay -= 0.0001
-                            self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
-                            print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
+                                  f"oa_max={cur_oa_max:.4f} (AP={test_stats[k][0]:.4f})")
+                    best_stat = {
+                        "epoch": -1,
+                    }
+                    if self.ema:
+                        self.ema.decay -= 0.0001
+                        self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
+                        print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
 
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},
