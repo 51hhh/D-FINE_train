@@ -140,6 +140,7 @@ def get_contrastive_denoising_training_group(
         "dn_positive_idx": dn_positive_idx,
         "dn_num_group": num_group,
         "dn_num_split": [num_denoising, num_queries],
+        "num_neg_random": num_neg_random,
     }
 
     return input_query_logits, input_query_bbox_unact, attn_mask, dn_meta

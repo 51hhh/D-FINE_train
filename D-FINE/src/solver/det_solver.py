@@ -192,10 +192,17 @@ class DetSolver(BaseSolver):
                         )
 
                 elif epoch >= self.train_dataloader.collate_fn.stop_epoch:
-                    # stg2 AP 未提升：检查 oa_max_score 是否有改善。
-                    # 若 oa_max_score 下降超过阈值，保存为 best_oa.pth 并跳过 rollback。
-                    # 否则按原逻辑 rollback 到 best_stg1.pth。
-                    cur_oa_max = _prev_oa_result.get("oa_max_score", 1.0)
+                    # stg2 AP 未提升：同步等待本轮OA线程完成，用本轮OA结果决策
+                    if _oa_thread is not None:
+                        _oa_thread.join()
+                        if _oa_result and self.writer:
+                            for k2, v2 in _oa_result.items():
+                                self.writer.add_scalar(f"Test/{k2}", v2, epoch)
+                            oa_threshold2 = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+                            print(f"Over-Activation @{oa_threshold2} [epoch {epoch}]: {_oa_result}")
+                        _oa_thread = None
+                    cur_oa_max = _oa_result.get("oa_max_score", _prev_oa_result.get("oa_max_score", 1.0))
+                    _oa_result.clear()
                     oa_ap_tolerance = self.cfg.yaml_cfg.get("oa_ap_tolerance", 0.0)
                     ap_close_enough = (top1 - test_stats[k][0]) <= oa_ap_tolerance
                     if cur_oa_max < _best_oa_max and ap_close_enough:

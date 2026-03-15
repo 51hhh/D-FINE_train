@@ -43,7 +43,6 @@ class DFINECriterion(nn.Module):
         boxes_weight_format=None,
         share_matched_indices=False,
         bg_loss_weight=1.0,
-        num_neg_random=0,
     ):
         """Create the criterion.
         Parameters:
@@ -67,7 +66,6 @@ class DFINECriterion(nn.Module):
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
         self.bg_loss_weight = bg_loss_weight
-        self.num_neg_random = num_neg_random
         self.num_pos, self.num_neg = None, None
 
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
@@ -413,14 +411,11 @@ class DFINECriterion(nn.Module):
             indices_dn = self.get_cdn_matched_indices(outputs["dn_meta"], targets)
             dn_num_boxes = num_boxes * outputs["dn_meta"]["dn_num_group"]
             dn_num_boxes = dn_num_boxes if dn_num_boxes > 0 else 1
-            # num_neg_random: extra background queries appended after CDN slots.
+            # num_neg_random from dn_meta: extra background queries appended after CDN slots.
             # Their loss is included in loss_vfl but the denominator (dn_num_boxes)
             # does not account for them, so their gradient is proportionally weak.
-            # We scale the vfl loss for dn outputs by a factor that compensates:
-            #   dn_neg_scale = (dn_num_boxes + num_neg_random) / dn_num_boxes
-            # This effectively un-dilutes the background gradient without changing
-            # the positive (GT-matched) loss magnitude.
-            _num_neg = getattr(self, 'num_neg_random', 0)
+            # Scale = (dn_num_boxes + num_neg_random) / dn_num_boxes compensates this.
+            _num_neg = outputs["dn_meta"].get("num_neg_random", 0)
             dn_vfl_extra_scale = (dn_num_boxes + _num_neg) / dn_num_boxes if _num_neg > 0 else 1.0
 
             for i, aux_outputs in enumerate(outputs["dn_outputs"]):
