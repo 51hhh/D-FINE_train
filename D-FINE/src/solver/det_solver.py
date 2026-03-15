@@ -216,10 +216,11 @@ class DetSolver(BaseSolver):
                     best_stat = {
                         "epoch": -1,
                     }
-                    if self.ema:
-                        self.ema.decay -= 0.0001
-                        self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
-                        print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
+                    # stg2 不再每 epoch rollback 到 best_stg1，让模型从 stg1 best 出发自然收敛
+                    # if self.ema:
+                    #     self.ema.decay -= 0.0001
+                    #     self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
+                    #     print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
 
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},
