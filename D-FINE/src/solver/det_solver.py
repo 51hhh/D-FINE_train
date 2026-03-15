@@ -26,6 +26,7 @@ class DetSolver(BaseSolver):
         metric_names = ["AP50:95", "AP50", "AP75", "APsmall", "APmedium", "APlarge"]
         _oa_thread = None   # 后台 OA 评估线程
         _oa_result = {}     # 上一轮 OA 结果（在下一轮训练开始后写入 TB）
+        _best_oa_max = 1.0  # 最优 oa_max_score（越低越好），用于 stg2 联合保存决策
 
         if self.use_wandb:
             import wandb
@@ -121,6 +122,7 @@ class DetSolver(BaseSolver):
                 output_dir=self.output_dir,
             )
 
+            _prev_oa_result = {}  # 保存本轮可用的OA结果（来自上一轮线程）
             if self.cfg.yaml_cfg.get("eval_overactivation", False) and dist_utils.is_main_process():
                 neg_dir = self.cfg.yaml_cfg.get("negative_img_dir", "")
                 oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
@@ -133,6 +135,7 @@ class DetSolver(BaseSolver):
                         for k, v in _oa_result.items():
                             self.writer.add_scalar(f"Test/{k}", v, epoch - 1)
                         print(f"Over-Activation @{oa_threshold} [epoch {epoch-1}]: {_oa_result}")
+                    _prev_oa_result = dict(_oa_result)  # 保存供 rollback 逻辑使用
                     _oa_result.clear()
                 # 启动本轮 OA 评估（后台线程，下一轮训练开始后才等待结果）
                 _oa_model = copy.deepcopy(module).eval()
@@ -189,13 +192,29 @@ class DetSolver(BaseSolver):
                         )
 
                 elif epoch >= self.train_dataloader.collate_fn.stop_epoch:
-                    best_stat = {
-                        "epoch": -1,
-                    }
-                    if self.ema:
-                        self.ema.decay -= 0.0001
-                        self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
-                        print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
+                    # stg2 AP 未提升：检查 oa_max_score 是否有改善。
+                    # 若 oa_max_score 下降超过阈值，保存为 best_oa.pth 并跳过 rollback。
+                    # 否则按原逻辑 rollback 到 best_stg1.pth。
+                    cur_oa_max = _prev_oa_result.get("oa_max_score", 1.0)
+                    oa_ap_tolerance = self.cfg.yaml_cfg.get("oa_ap_tolerance", 0.0)
+                    ap_close_enough = (top1 - test_stats[k][0]) <= oa_ap_tolerance
+                    if cur_oa_max < _best_oa_max and ap_close_enough:
+                        _best_oa_max = cur_oa_max
+                        if self.output_dir and dist_utils.is_main_process():
+                            dist_utils.save_on_master(
+                                self.state_dict(), self.output_dir / "best_oa.pth"
+                            )
+                            print(f"[OA] Saved best_oa.pth at epoch {epoch}: "
+                                  f"oa_max={cur_oa_max:.4f} (AP={test_stats[k][0]:.4f}, "
+                                  f"top1={top1:.4f}, delta={top1-test_stats[k][0]:.4f})")
+                    else:
+                        best_stat = {
+                            "epoch": -1,
+                        }
+                        if self.ema:
+                            self.ema.decay -= 0.0001
+                            self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
+                            print(f"Refresh EMA at epoch {epoch} with decay {self.ema.decay}")
 
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},
