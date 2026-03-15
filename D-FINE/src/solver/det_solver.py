@@ -101,9 +101,9 @@ class DetSolver(BaseSolver):
 
             self.last_epoch += 1
 
-            if self.output_dir and epoch < self.train_dataloader.collate_fn.stop_epoch:
+            if self.output_dir:
                 checkpoint_paths = [self.output_dir / "last.pth"]
-                # extra checkpoint before LR drop and every 100 epochs
+                # extra checkpoint before LR drop and every N epochs
                 if (epoch + 1) % args.checkpoint_freq == 0:
                     checkpoint_paths.append(self.output_dir / f"checkpoint{epoch:04}.pth")
                 for checkpoint_path in checkpoint_paths:
