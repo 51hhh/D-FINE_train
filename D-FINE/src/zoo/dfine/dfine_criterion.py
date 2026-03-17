@@ -411,13 +411,6 @@ class DFINECriterion(nn.Module):
             indices_dn = self.get_cdn_matched_indices(outputs["dn_meta"], targets)
             dn_num_boxes = num_boxes * outputs["dn_meta"]["dn_num_group"]
             dn_num_boxes = dn_num_boxes if dn_num_boxes > 0 else 1
-            # num_neg_random from dn_meta: extra background queries appended after CDN slots.
-            # Their loss is included in loss_vfl but the denominator (dn_num_boxes)
-            # does not account for them, so their gradient is proportionally weak.
-            # Scale = (dn_num_boxes + num_neg_random) / dn_num_boxes compensates this.
-            _num_neg = outputs["dn_meta"].get("num_neg_random", 0)
-            dn_vfl_extra_scale = (dn_num_boxes + _num_neg) / dn_num_boxes if _num_neg > 0 else 1.0
-
             for i, aux_outputs in enumerate(outputs["dn_outputs"]):
                 aux_outputs["is_dn"] = True
                 aux_outputs["up"], aux_outputs["reg_scale"] = outputs["up"], outputs["reg_scale"]
@@ -429,9 +422,6 @@ class DFINECriterion(nn.Module):
                     l_dict = {
                         k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
                     }
-                    # Apply extra scale to vfl loss only (compensate for bg query dilution)
-                    if _num_neg > 0 and f'loss_vfl' in l_dict:
-                        l_dict['loss_vfl'] = l_dict['loss_vfl'] * dn_vfl_extra_scale
                     l_dict = {k + f"_dn_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 

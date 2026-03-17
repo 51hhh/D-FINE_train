@@ -1,0 +1,99 @@
+# E2: LR fix (milestones:[56]) + extra_scale removed + bg_loss_weight=6.0
+# Method A (negative images) + Method D (DN random bg queries)
+# From scratch training with obj2coco pretrained weights
+#
+# python train.py -c ../config/volleyball_s_E2_lr_noscale_bg6.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
+
+__include__: [
+  '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
+]
+
+output_dir: ./output/exp_s_E2_lr_noscale_bg6
+
+num_classes: 1
+remap_mscoco_category: False
+
+# ============ Method D: DN random background queries ============
+DFINETransformer:
+  num_neg_random: 100
+  neg_iou_threshold: 0.2
+
+# ============ bg_loss_weight=6.0 (compensate for extra_scale removal) ============
+DFINECriterion:
+  bg_loss_weight: 6.0
+
+# ============ Over-Activation eval during training ============
+eval_overactivation: True
+negative_img_dir: "../coco/images/negative_samples"
+oa_conf_threshold: 0.3
+oa_ap_min: 0.84
+
+# ============ Train dataloader ============
+train_dataloader:
+  collate_fn:
+    base_size: 640
+    base_size_repeat: 10
+    stop_epoch: 56
+    ema_restart_decay: 0.9999
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/train_with_negatives.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        - type: RandomPhotometricDistort
+          p: 0.5
+        - type: RandomZoomOut
+          fill: 0
+        - type: RandomIoUCrop
+          p: 0.8
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: RandomHorizontalFlip
+        - type: Resize
+          size: [640, 640]
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+      policy:
+        name: stop_epoch
+        epoch: 56
+        ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
+    type: CocoDetection
+  drop_last: True
+  num_workers: 36
+  shuffle: True
+  total_batch_size: 32
+  type: DataLoader
+
+val_dataloader:
+  collate_fn:
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/val.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        - type: Resize
+          size: [640, 640]
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+    type: CocoDetection
+  drop_last: False
+  num_workers: 12
+  shuffle: False
+  total_batch_size: 64
+  type: DataLoader

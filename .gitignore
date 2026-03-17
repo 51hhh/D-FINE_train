@@ -62,7 +62,7 @@ Thumbs.db
 .idea/
 .vscode/
 .claude
-
+.github
 
 coco.zip
 *.z*
