@@ -37,7 +37,7 @@ train_dataloader:
     type: BatchImageCollateFunction
   dataset:
     img_folder: ../coco/images
-    ann_file: ../coco/converted/annotations/train_with_negatives.json
+    ann_file: ../coco/converted/annotations/train.json      # 使用训练集训练，不包含负样本
     return_masks: False
     transforms:
       type: Compose

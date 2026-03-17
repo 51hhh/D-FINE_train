@@ -119,7 +119,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="E:/数据集/model/exp_s_finetune_neg_aug.pth",
+        default="E:/数据集/model/exp_s_obj2coco_neg_d_bg2_last.pth",
         help=".pth 权重文件",
     )
     parser.add_argument("--camera-id", type=int, default=0, help="摄像头编号")
