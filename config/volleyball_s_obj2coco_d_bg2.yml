@@ -1,13 +1,14 @@
-# obj2coco pretrained, negative images (A) + DN random background queries (D)
+# obj2coco pretrained, no-A baseline: train.json + DN random background queries (D)
 # + bg_loss_weight=2.0（背景 VFL loss 权重 x2）+ eval_overactivation 训练中评估
+# 说明：negative_samples 仅用于 OA 评估，不并入训练集。
 # 用法（在 D-FINE 目录下执行）：
-# python train.py -c ../config/volleyball_s_obj2coco_neg_d_bg2.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
+# python train.py -c ../config/volleyball_s_obj2coco_d_bg2.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
 
 __include__: [
   '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
 ]
 
-output_dir: ./output/exp_s_obj2coco_neg_d_bg2
+output_dir: ./output/exp_s_obj2coco_d_bg2_no_A
 
 num_classes: 1
 remap_mscoco_category: False
@@ -21,7 +22,7 @@ DFINETransformer:
 DFINECriterion:
   bg_loss_weight: 2.0         # 背景 query VFL loss 权重倍数（1.0=不加权）
 
-# ============ Over-Activation 训练中评估 ============
+# ============ Over-Activation 训练中评估（仅 OA 评估，不并入训练集） ============
 eval_overactivation: True
 negative_img_dir: "../coco/images/negative_samples"
 oa_conf_threshold: 0.3        # 推理置信度阈值，超过此值才计入误检
@@ -37,7 +38,7 @@ train_dataloader:
     type: BatchImageCollateFunction
   dataset:
     img_folder: ../coco/images
-    ann_file: ../coco/converted/annotations/train.json      # 使用训练集训练，不包含负样本
+    ann_file: ../coco/converted/annotations/train.json      # no-A：坚持使用 train.json 训练，不包含 negative_samples
     return_masks: False
     transforms:
       type: Compose
