@@ -124,28 +124,45 @@ class DetSolver(BaseSolver):
 
             _prev_oa_result = {}  # 保存本轮可用的OA结果（来自上一轮线程）
             if self.cfg.yaml_cfg.get("eval_overactivation", False) and dist_utils.is_main_process():
-                neg_dir = self.cfg.yaml_cfg.get("negative_img_dir", "")
-                oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
-                oa_input_size = oa_input_size[0] if isinstance(oa_input_size, (list, tuple)) else oa_input_size
-                oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
-                # 等待上一轮 OA 线程完成，记录结果
-                if _oa_thread is not None:
-                    _oa_thread.join()
-                    if _oa_result and self.writer:
-                        for k, v in _oa_result.items():
-                            self.writer.add_scalar(f"Test/{k}", v, epoch - 1)
-                        print(f"Over-Activation @{oa_threshold} [epoch {epoch-1}]: {_oa_result}")
-                    _prev_oa_result = dict(_oa_result)  # 保存供 rollback 逻辑使用
-                    _oa_result.clear()
-                # 启动本轮 OA 评估（后台线程，下一轮训练开始后才等待结果）
-                _oa_model = copy.deepcopy(module).eval()
-                _oa_postprocessor = copy.deepcopy(self.postprocessor)
-                def _run_oa(_m=_oa_model, _pp=_oa_postprocessor, _nd=neg_dir,
-                            _dev=self.device, _sz=oa_input_size, _thr=oa_threshold):
-                    m = evaluate_overactivation(_m, _pp, _nd, _dev, input_size=_sz, conf_threshold=_thr)
-                    _oa_result.update(m)
-                _oa_thread = threading.Thread(target=_run_oa, daemon=True)
-                _oa_thread.start()
+                # AP门控：只有当前AP达到阈值后才启动OA评估
+                oa_ap_min = self.cfg.yaml_cfg.get("oa_ap_min", 0.0)
+                current_ap = test_stats.get("coco_eval_bbox", [0])[0]  # AP50:95
+                ap_qualified = current_ap >= oa_ap_min
+
+                if ap_qualified:
+                    neg_dir = self.cfg.yaml_cfg.get("negative_img_dir", "")
+                    oa_input_size = self.cfg.yaml_cfg.get("eval_spatial_size", [640, 640])
+                    oa_input_size = oa_input_size[0] if isinstance(oa_input_size, (list, tuple)) else oa_input_size
+                    oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+                    # 等待上一轮 OA 线程完成，记录结果
+                    if _oa_thread is not None:
+                        _oa_thread.join()
+                        if _oa_result and self.writer:
+                            for k, v in _oa_result.items():
+                                self.writer.add_scalar(f"Test/{k}", v, epoch - 1)
+                            print(f"Over-Activation @{oa_threshold} [epoch {epoch-1}]: {_oa_result}")
+                        _prev_oa_result = dict(_oa_result)  # 保存供 rollback 逻辑使用
+                        _oa_result.clear()
+                    # 启动本轮 OA 评估（后台线程，下一轮训练开始后才等待结果）
+                    _oa_model = copy.deepcopy(module).eval()
+                    _oa_postprocessor = copy.deepcopy(self.postprocessor)
+                    def _run_oa(_m=_oa_model, _pp=_oa_postprocessor, _nd=neg_dir,
+                                _dev=self.device, _sz=oa_input_size, _thr=oa_threshold):
+                        m = evaluate_overactivation(_m, _pp, _nd, _dev, input_size=_sz, conf_threshold=_thr)
+                        _oa_result.update(m)
+                    _oa_thread = threading.Thread(target=_run_oa, daemon=True)
+                    _oa_thread.start()
+                    if epoch == start_epoch or (epoch > start_epoch and not hasattr(self, '_oa_started')):
+                        print(f"[OA] AP qualified ({current_ap:.4f} >= {oa_ap_min}), OA evaluation enabled")
+                        self._oa_started = True
+                else:
+                    # AP未达标，跳过OA评估
+                    if _oa_thread is not None:
+                        _oa_thread.join()
+                        _oa_thread = None
+                    if not hasattr(self, '_oa_waiting_logged') or epoch % 10 == 0:
+                        print(f"[OA] Waiting for AP >= {oa_ap_min} (current: {current_ap:.4f})")
+                        self._oa_waiting_logged = True
 
             # TODO
             for k in test_stats:
