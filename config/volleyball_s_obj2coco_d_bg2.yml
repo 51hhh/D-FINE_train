@@ -1,13 +1,14 @@
-# obj2coco pretrained, negative images (A) + DN random background queries (D)
+# obj2coco pretrained, no-A baseline: train.json only + DN random background queries (D)
 # + bg_loss_weight=2.0（背景 VFL loss 权重 x2）+ eval_overactivation 训练中评估
+# negative_samples 仅用于 OA 评估，不并入训练集
 # 用法（在 D-FINE 目录下执行）：
-# python train.py -c ../config/volleyball_s_obj2coco_neg_d_bg2.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
+# python train.py -c ../config/volleyball_s_obj2coco_d_bg2.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
 
 __include__: [
   '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
 ]
 
-output_dir: ./output/exp_s_obj2coco_neg_d_bg2
+output_dir: ./output/exp_s_obj2coco_d_bg2_no_A
 
 num_classes: 1
 remap_mscoco_category: False
@@ -16,13 +17,17 @@ remap_mscoco_category: False
 DFINETransformer:
   num_neg_random: 100         # 每 batch 插入的随机背景 query 数（建议范围 50~200）
   neg_iou_threshold: 0.2      # 随机框与 GT IoU 过滤阈值，越小保留越多困难负样本
+  num_queries: 100            # 300→100，减少过激活槽位
+
+DFINEPostProcessor:
+  num_top_queries: 100        # 必须 <= num_queries，避免 topk 越界
 
 # ============ 背景 loss 权重（放大背景查询的 VFL loss 梯度）============
 DFINECriterion:
   bg_loss_weight: 2.0         # 背景 query VFL loss 权重倍数（1.0=不加权）
 
 # ============ Over-Activation 训练中评估 ============
-eval_overactivation: True
+eval_overactivation: False
 negative_img_dir: "../coco/images/negative_samples"
 oa_conf_threshold: 0.3        # 推理置信度阈值，超过此值才计入误检
 oa_ap_min: 0.84               # AP高于此值时才对比OA并保存best_oa.pth（默认0.0=始终对比）
