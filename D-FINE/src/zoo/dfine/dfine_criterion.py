@@ -66,6 +66,7 @@ class DFINECriterion(nn.Module):
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
         self.bg_loss_weight = bg_loss_weight
+        self.latest_synth_neg_stats = {}
         self.num_pos, self.num_neg = None, None
 
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
@@ -242,6 +243,34 @@ class DFINECriterion(nn.Module):
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
+
+    def loss_synthetic_negative(self, outputs, loss_weight=0.0, topk=5):
+        zero = outputs["pred_logits"].sum() * 0.0
+        self.latest_synth_neg_stats = {
+            "topk_queries": 0.0,
+            "mean_logit": 0.0,
+            "max_logit": 0.0,
+        }
+        if loss_weight <= 0:
+            return {"loss_synth_neg": zero}
+
+        logits = outputs["pred_logits"]
+        if logits.numel() == 0:
+            return {"loss_synth_neg": zero}
+
+        query_logits = logits.max(dim=-1).values if logits.shape[-1] > 1 else logits[..., 0]
+        k = min(max(int(topk), 0), query_logits.shape[1])
+        if k == 0:
+            return {"loss_synth_neg": zero}
+
+        top_logits = torch.topk(query_logits, k=k, dim=1).values
+        loss = F.softplus(top_logits).mean() * loss_weight
+        self.latest_synth_neg_stats = {
+            "topk_queries": float(k),
+            "mean_logit": query_logits.mean().detach().item(),
+            "max_logit": query_logits.max().detach().item(),
+        }
+        return {"loss_synth_neg": loss}
 
     def _get_tgt_permutation_idx(self, indices):
         # permute targets following indices

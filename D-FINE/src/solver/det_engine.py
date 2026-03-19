@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List
 import numpy as np
 import torch
 import torch.amp
+import torch.nn.functional as F
 from PIL import Image
 from torch.cuda.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard import SummaryWriter
@@ -24,6 +25,138 @@ from ..data.dataset import mscoco_category2label
 from ..misc import MetricLogger, SmoothedValue, dist_utils, save_samples
 from ..optim import ModelEMA, Warmup
 from .validator import Validator, scale_boxes
+
+
+def compute_synthetic_negative_weight(ap_value: float, coeff: float = 1.0) -> float:
+    ap_value = max(0.0, min(1.0, float(ap_value)))
+    coeff = max(0.0, float(coeff))
+    return coeff * (2.0 * ap_value) ** 2
+
+
+def _boxes_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    return torch.stack(
+        [
+            boxes[:, 0] - boxes[:, 2] / 2,
+            boxes[:, 1] - boxes[:, 3] / 2,
+            boxes[:, 0] + boxes[:, 2] / 2,
+            boxes[:, 1] + boxes[:, 3] / 2,
+        ],
+        dim=-1,
+    )
+
+
+def _sample_background_patch(image: torch.Tensor, mask: torch.Tensor, patch_hw, max_trials: int):
+    _, height, width = image.shape
+    patch_h, patch_w = int(patch_hw[0]), int(patch_hw[1])
+    patch_h = max(1, min(patch_h, height))
+    patch_w = max(1, min(patch_w, width))
+    if patch_h >= height or patch_w >= width:
+        return None
+    for _ in range(max_trials):
+        top = torch.randint(0, height - patch_h + 1, (1,), device=image.device).item()
+        left = torch.randint(0, width - patch_w + 1, (1,), device=image.device).item()
+        region = mask[top:top + patch_h, left:left + patch_w]
+        if not region.any():
+            return image[:, top:top + patch_h, left:left + patch_w].clone()
+    return None
+
+
+def build_synthetic_negative_batch(samples: torch.Tensor, targets, cfg):
+    generated_images = []
+    generated_targets = []
+    generated_count = 0.0
+    filled_boxes = 0.0
+    background_prob = float(cfg.get("synthetic_neg_fill_background_prob", 0.5))
+    noise_prob = float(cfg.get("synthetic_neg_fill_noise_prob", 0.25))
+    solid_prob = float(cfg.get("synthetic_neg_fill_solid_prob", 0.25))
+    expand_ratio = float(cfg.get("synthetic_neg_expand_ratio", 1.15))
+    max_trials = int(cfg.get("synthetic_neg_max_trials", 30))
+    mode_total = background_prob + noise_prob + solid_prob
+    if mode_total <= 0:
+        background_prob, noise_prob, solid_prob = 1.0, 0.0, 0.0
+        mode_total = 1.0
+    probs = torch.tensor([background_prob, noise_prob, solid_prob], dtype=torch.float32, device=samples.device)
+    probs = probs / probs.sum()
+
+    for sample, target in zip(samples, targets):
+        boxes = target.get("boxes")
+        labels = target.get("labels")
+        if boxes is None or labels is None or len(boxes) == 0:
+            continue
+
+        synth = sample.clone()
+        _, height, width = synth.shape
+        mask = torch.zeros((height, width), dtype=torch.bool, device=synth.device)
+        xyxy = _boxes_cxcywh_to_xyxy(boxes.to(dtype=synth.dtype)).clamp(0.0, 1.0)
+        expanded = xyxy.clone()
+        centers = (expanded[:, :2] + expanded[:, 2:]) / 2
+        half_sizes = (expanded[:, 2:] - expanded[:, :2]) * 0.5 * expand_ratio
+        expanded[:, :2] = (centers - half_sizes).clamp(0.0, 1.0)
+        expanded[:, 2:] = (centers + half_sizes).clamp(0.0, 1.0)
+
+        changed = False
+        for box in expanded:
+            x1 = int(torch.floor(box[0] * width).item())
+            y1 = int(torch.floor(box[1] * height).item())
+            x2 = int(torch.ceil(box[2] * width).item())
+            y2 = int(torch.ceil(box[3] * height).item())
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = max(x1 + 1, min(x2, width))
+            y2 = max(y1 + 1, min(y2, height))
+            mask[y1:y2, x1:x2] = True
+
+        for box in expanded:
+            x1 = int(torch.floor(box[0] * width).item())
+            y1 = int(torch.floor(box[1] * height).item())
+            x2 = int(torch.ceil(box[2] * width).item())
+            y2 = int(torch.ceil(box[3] * height).item())
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = max(x1 + 1, min(x2, width))
+            y2 = max(y1 + 1, min(y2, height))
+            patch_h, patch_w = y2 - y1, x2 - x1
+            mode_idx = torch.multinomial(probs, 1).item()
+            if mode_idx == 0:
+                fill_patch = _sample_background_patch(synth, mask, (patch_h, patch_w), max_trials)
+                if fill_patch is None:
+                    fill_patch = torch.rand((3, patch_h, patch_w), device=synth.device, dtype=synth.dtype)
+            elif mode_idx == 1:
+                fill_patch = torch.rand((3, patch_h, patch_w), device=synth.device, dtype=synth.dtype)
+            else:
+                color = torch.rand((3, 1, 1), device=synth.device, dtype=synth.dtype)
+                fill_patch = color.expand(3, patch_h, patch_w)
+            synth[:, y1:y2, x1:x2] = fill_patch
+            changed = True
+            filled_boxes += 1.0
+
+        if not changed:
+            continue
+
+        neg_target = {}
+        for key, value in target.items():
+            if isinstance(value, torch.Tensor):
+                neg_target[key] = value.clone()
+            else:
+                neg_target[key] = value
+        neg_target["boxes"] = torch.zeros((0, 4), dtype=boxes.dtype, device=boxes.device)
+        neg_target["labels"] = torch.zeros((0,), dtype=labels.dtype, device=labels.device)
+        if "area" in neg_target:
+            neg_target["area"] = torch.zeros((0,), dtype=neg_target["area"].dtype, device=neg_target["area"].device)
+        if "iscrowd" in neg_target:
+            neg_target["iscrowd"] = torch.zeros((0,), dtype=neg_target["iscrowd"].dtype, device=neg_target["iscrowd"].device)
+        neg_target["synthetic_negative"] = True
+        generated_images.append(synth)
+        generated_targets.append(neg_target)
+        generated_count += 1.0
+
+    if not generated_images:
+        return None, [], {"generated_images": 0.0, "filled_boxes": 0.0}
+
+    return torch.stack(generated_images, dim=0), generated_targets, {
+        "generated_images": generated_count,
+        "filled_boxes": filled_boxes,
+    }
 
 
 def train_one_epoch(
@@ -71,6 +204,12 @@ def train_one_epoch(
         samples = samples.to(device)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
+        synth_cfg = kwargs.get("yaml_cfg", {})
+        prev_ap = kwargs.get("prev_ap", 0.0)
+        synth_weight_coeff = float(synth_cfg.get("synthetic_neg_weight_coeff", 1.0))
+        synth_weight = compute_synthetic_negative_weight(prev_ap, coeff=synth_weight_coeff)
+        synth_samples, synth_targets, synth_stats = build_synthetic_negative_batch(samples, targets, synth_cfg)
+
         if scaler is not None:
             with torch.autocast(device_type=str(device), cache_enabled=True):
                 outputs = model(samples, targets=targets)
@@ -89,6 +228,15 @@ def train_one_epoch(
 
             with torch.autocast(device_type=str(device), enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
+                if synth_samples is not None and synth_weight > 0:
+                    synth_outputs = model(synth_samples, targets=synth_targets)
+                    loss_dict.update(
+                        criterion.loss_synthetic_negative(
+                            synth_outputs,
+                            loss_weight=synth_weight,
+                            topk=int(synth_cfg.get("synthetic_neg_topk", 5)),
+                        )
+                    )
 
             loss = sum(loss_dict.values())
             scaler.scale(loss).backward()
@@ -104,6 +252,15 @@ def train_one_epoch(
         else:
             outputs = model(samples, targets=targets)
             loss_dict = criterion(outputs, targets, **metas)
+            if synth_samples is not None and synth_weight > 0:
+                synth_outputs = model(synth_samples, targets=synth_targets)
+                loss_dict.update(
+                    criterion.loss_synthetic_negative(
+                        synth_outputs,
+                        loss_weight=synth_weight,
+                        topk=int(synth_cfg.get("synthetic_neg_topk", 5)),
+                    )
+                )
 
             loss: torch.Tensor = sum(loss_dict.values())
             optimizer.zero_grad()
@@ -139,6 +296,13 @@ def train_one_epoch(
                 writer.add_scalar(f"Lr/pg_{j}", pg["lr"], global_step)
             for k, v in loss_dict_reduced.items():
                 writer.add_scalar(f"Loss/{k}", v.item(), global_step)
+            writer.add_scalar("Train/synth_neg_dynamic_weight", float(synth_weight), global_step)
+            for k, v in synth_stats.items():
+                writer.add_scalar(f"Train/synth_neg_{k}", float(v), global_step)
+            synth_neg_stats = getattr(criterion, "latest_synth_neg_stats", None)
+            if synth_neg_stats:
+                for k, v in synth_neg_stats.items():
+                    writer.add_scalar(f"Train/synth_neg_{k}", float(v), global_step)
 
     if use_wandb:
         wandb.log(

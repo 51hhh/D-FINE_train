@@ -19,6 +19,13 @@ from ._solver import BaseSolver
 from .det_engine import evaluate, evaluate_overactivation, train_one_epoch
 
 
+def _get_bbox_ap50_95(test_stats) -> float:
+    bbox_stats = test_stats.get("coco_eval_bbox")
+    if not bbox_stats:
+        return 0.0
+    return float(bbox_stats[0])
+
+
 class DetSolver(BaseSolver):
     def fit(self):
         self.train()
@@ -64,6 +71,7 @@ class DetSolver(BaseSolver):
                 print(f"best_stat: {best_stat}")
 
         best_stat_print = best_stat.copy()
+        prev_ap = float(best_stat.get("coco_eval_bbox", 0.0))
         start_time = time.time()
         start_epoch = self.last_epoch + 1
         for epoch in range(start_epoch, args.epochs):
@@ -94,6 +102,8 @@ class DetSolver(BaseSolver):
                 writer=self.writer,
                 use_wandb=self.use_wandb,
                 output_dir=self.output_dir,
+                yaml_cfg=self.cfg.yaml_cfg,
+                prev_ap=prev_ap,
             )
 
             if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
@@ -121,6 +131,7 @@ class DetSolver(BaseSolver):
                 self.use_wandb,
                 output_dir=self.output_dir,
             )
+            prev_ap = _get_bbox_ap50_95(test_stats)
 
             _prev_oa_result = {}  # 保存本轮可用的OA结果（来自上一轮线程）
             if self.cfg.yaml_cfg.get("eval_overactivation", False) and dist_utils.is_main_process():
