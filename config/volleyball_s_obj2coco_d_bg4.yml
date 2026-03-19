@@ -1,0 +1,121 @@
+# obj2coco pretrained, no-A baseline: train.json only + DN random background queries (D)
+# + bg_loss_weight=4.0（背景 VFL loss 权重 x4，相比bg2更激进）+ eval_overactivation 训练中评估
+# negative_samples 仅用于 OA 评估，不并入训练集
+# 用法（在 D-FINE 目录下执行）：
+# python train.py -c ../config/volleyball_s_obj2coco_d_bg4.yml --use-amp --seed 0 -t weights/dfine_s_obj2coco.pth
+
+__include__: [
+  '../D-FINE/configs/dfine/custom/objects365/dfine_hgnetv2_s_obj2custom.yml',
+]
+
+output_dir: ./output/exp_s_obj2coco_d_bg4_no_A
+
+num_classes: 1
+remap_mscoco_category: False
+
+# ============ Method D: DN random background queries ============
+DFINETransformer:
+  num_neg_random: 100         # 每 batch 插入的随机背景 query 数（建议范围 50~200）
+  neg_iou_threshold: 0.2      # 随机框与 GT IoU 过滤阈值，越小保留越多困难负样本
+  num_queries: 100            # 300→100，减少过激活槽位
+
+DFINEPostProcessor:
+  num_top_queries: 100        # 必须 <= num_queries，避免 topk 越界
+
+# ============ 背景 loss 权重（放大背景查询的 VFL loss 梯度）============
+DFINECriterion:
+  bg_loss_weight: 4.0         # 背景 query VFL loss 权重倍数（从2.0提升到4.0，更激进抑制误检）
+
+# ============ Over-Activation 训练中评估 ============
+eval_overactivation: False    # 暂不启用，等epoch 80后根据需要开启
+negative_img_dir: "../coco/images/negative_samples"
+oa_conf_threshold: 0.3        # 推理置信度阈值，超过此值才计入误检
+oa_ap_min: 0.84               # AP高于此值时才对比OA并保存best_oa.pth（默认0.0=始终对比）
+
+# ============ Train dataloader ============
+train_dataloader:
+  collate_fn:
+    base_size: 640
+    base_size_repeat: 10
+    stop_epoch: 56
+    ema_restart_decay: 0.9999
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/train.json      # 使用训练集训练，不包含负样本
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        - type: RandomPhotometricDistort
+          p: 0.5
+        - type: RandomZoomOut
+          fill: 0
+        - type: RandomIoUCrop
+          p: 0.8
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: RandomHorizontalFlip
+        - type: Resize
+          size: [640, 640]
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+      policy:
+        name: stop_epoch
+        epoch: 56
+        ops: [RandomPhotometricDistort, RandomZoomOut, RandomIoUCrop]
+    type: CocoDetection
+  drop_last: True
+  num_workers: 36
+  shuffle: True
+  total_batch_size: 32
+  type: DataLoader
+
+val_dataloader:
+  collate_fn:
+    type: BatchImageCollateFunction
+  dataset:
+    img_folder: ../coco/images
+    ann_file: ../coco/converted/annotations/val.json
+    return_masks: False
+    # 验证集使用最小增强
+    transforms:
+      type: Compose
+      ops:
+        - type: Resize
+          size: [640, 640]
+        - type: ConvertPILImage
+          dtype: float32
+          scale: True
+        - type: ConvertBoxes
+          fmt: cxcywh
+          normalize: True
+    type: CocoDetection
+  drop_last: False
+  num_workers: 12
+  shuffle: False
+  total_batch_size: 64
+  type: DataLoader
+
+# 每 N 轮额外保存一次 checkpointxxxx.pth（last/best 仍会按训练逻辑保存）
+checkpoint_freq: 12
+epochs: 160
+
+lr_warmup_scheduler:
+  type: LinearWarmup
+  warmup_duration: 500
+
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  start: 0
+  warmups: 2000
+
+clip_max_norm: 0.1
+sync_bn: False

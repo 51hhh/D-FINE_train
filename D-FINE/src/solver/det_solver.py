@@ -159,8 +159,20 @@ class DetSolver(BaseSolver):
                     # AP未达标，跳过OA评估
                     if _oa_thread is not None:
                         _oa_thread.join()
+                        # 统一回收OA结果（即使AP跌破阈值）
+                        if _oa_result and self.writer:
+                            oa_threshold = self.cfg.yaml_cfg.get("oa_conf_threshold", 0.3)
+                            for k, v in _oa_result.items():
+                                self.writer.add_scalar(f"Test/{k}", v, epoch - 1)
+                            print(f"Over-Activation @{oa_threshold} [epoch {epoch-1}]: {_oa_result}")
+                        _prev_oa_result = dict(_oa_result)
+                        _oa_result.clear()
                         _oa_thread = None
-                    if not hasattr(self, '_oa_waiting_logged') or epoch % 10 == 0:
+                    # 状态切换日志
+                    if hasattr(self, '_oa_started') and self._oa_started:
+                        print(f"[OA] AP dropped below threshold ({current_ap:.4f} < {oa_ap_min}), OA evaluation paused")
+                        self._oa_started = False
+                    elif not hasattr(self, '_oa_waiting_logged') or epoch % 10 == 0:
                         print(f"[OA] Waiting for AP >= {oa_ap_min} (current: {current_ap:.4f})")
                         self._oa_waiting_logged = True
 
