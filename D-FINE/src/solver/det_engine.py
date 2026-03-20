@@ -408,7 +408,7 @@ def train_one_epoch(
     synth_cfg = kwargs.get("yaml_cfg", {})
     prev_ap = kwargs.get("prev_ap", 0.0)
     synth_weight_coeff = float(synth_cfg.get("synthetic_neg_weight_coeff", 1.0))
-    synth_topk = int(synth_cfg.get("synthetic_neg_topk", 5))
+    synth_topk = int(synth_cfg.get("synthetic_neg_topk", 0))
     is_distributed = dist_utils.is_dist_available_and_initialized() and dist_utils.get_world_size() > 1
     can_defer_grad_sync = is_distributed and hasattr(model, "no_sync")
     cuda_total_memory = 0.0

@@ -26,8 +26,8 @@ DFINEPostProcessor:
 DFINECriterion:
   bg_loss_weight: 4.0         # 背景 query VFL loss 权重倍数（从2.0提升到4.0，更激进抑制误检）
 
-synthetic_neg_weight_coeff: 1.0   # x，最终权重 = x * (2 * AP)^2
-synthetic_neg_topk: 5              # 每张合成无球图只惩罚 top-k 最强激活 query
+synthetic_neg_weight_coeff: 3.0   # x，最终权重 = x * (2 * AP)^2；AP>0.8 后让妙妙loss具备主导能力
+synthetic_neg_topk: 0              # 0=惩罚所有激活(query_logit>0)的 query，而不是只罚 top-k
 synthetic_neg_expand_ratio: 1.15   # 擦除框扩张比例，避免残留球边缘
 synthetic_neg_max_trials: 30       # 背景 patch 回填的最大随机尝试次数
 synthetic_neg_fill_background_prob: 0.5
@@ -38,7 +38,7 @@ synthetic_neg_fill_solid_prob: 0.25
 eval_overactivation: True    # 暂不启用，等epoch 80后根据需要开启
 negative_img_dir: "../coco/images/negative_samples"
 oa_conf_threshold: 0.3        # 推理置信度阈值，超过此值才计入误检
-oa_ap_min: 0.84               # AP高于此值时才对比OA并保存best_oa.pth（默认0.0=始终对比）
+oa_ap_min: 0.8               # AP高于此值时才对比OA并保存best_oa.pth（默认0.0=始终对比）
 
 # ============ Train dataloader ============
 train_dataloader:
@@ -82,7 +82,7 @@ train_dataloader:
   drop_last: True
   num_workers: 36
   shuffle: True
-  total_batch_size: 32
+  total_batch_size: 24
   type: DataLoader
 
 val_dataloader:
@@ -108,7 +108,7 @@ val_dataloader:
   drop_last: False
   num_workers: 12
   shuffle: False
-  total_batch_size: 64
+  total_batch_size: 16
   type: DataLoader
 
 # 每 N 轮额外保存一次 checkpointxxxx.pth（last/best 仍会按训练逻辑保存）

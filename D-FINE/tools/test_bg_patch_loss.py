@@ -432,7 +432,7 @@ def test_loss_synthetic_negative_zero_weight_returns_zero():
     assert loss_dict["loss_synth_neg"].item() == 0.0
 
 
-def test_loss_synthetic_negative_handles_zero_topk():
+def test_loss_synthetic_negative_uses_all_activated_queries_when_topk_disabled():
     criterion = DFINECriterion(
         matcher=DummyMatcher(),
         weight_dict={"loss_vfl": 1, "loss_bbox": 1, "loss_giou": 1, "loss_fgl": 1, "loss_ddf": 1},
@@ -440,12 +440,13 @@ def test_loss_synthetic_negative_handles_zero_topk():
         num_classes=1,
     )
     outputs = {
-        "pred_logits": torch.tensor([[[4.0], [1.0]]], dtype=torch.float32),
-        "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1]]], dtype=torch.float32),
+        "pred_logits": torch.tensor([[[4.0], [1.0], [-2.0]]], dtype=torch.float32),
+        "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1], [0.8, 0.8, 0.1, 0.1]]], dtype=torch.float32),
     }
     loss_dict = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=0)
-    assert loss_dict["loss_synth_neg"].item() == 0.0
-    assert criterion.latest_synth_neg_stats["topk_queries"] == 0.0
+    expected = (F.softplus(torch.tensor(4.0)) + F.softplus(torch.tensor(1.0))) / 2
+    assert math.isclose(loss_dict["loss_synth_neg"].item(), expected.item(), rel_tol=1e-5)
+    assert criterion.latest_synth_neg_stats["topk_queries"] == 2.0
 
 
 def test_loss_synthetic_negative_multi_class_uses_max_class_logit():
@@ -466,22 +467,24 @@ def test_loss_synthetic_negative_multi_class_uses_max_class_logit():
     assert math.isclose(criterion.latest_synth_neg_stats["mean_logit"], 1.9, rel_tol=1e-5)
 
 
-def test_loss_synthetic_negative_keeps_zero_grad_path_when_topk_disabled():
+def test_loss_synthetic_negative_ignores_non_activated_queries_when_topk_disabled():
     criterion = DFINECriterion(
         matcher=DummyMatcher(),
         weight_dict={"loss_vfl": 1, "loss_bbox": 1, "loss_giou": 1, "loss_fgl": 1, "loss_ddf": 1},
         losses=["vfl", "boxes", "local"],
         num_classes=1,
     )
-    pred_logits = torch.tensor([[[1.0], [2.0]]], dtype=torch.float32, requires_grad=True)
+    pred_logits = torch.tensor([[[1.0], [-2.0]]], dtype=torch.float32, requires_grad=True)
     outputs = {
         "pred_logits": pred_logits,
         "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1]]], dtype=torch.float32),
     }
     loss = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=0)["loss_synth_neg"]
     loss.backward()
+    expected_first = torch.sigmoid(torch.tensor(1.0)) / 1.0
     assert pred_logits.grad is not None
-    assert torch.allclose(pred_logits.grad, torch.zeros_like(pred_logits.grad))
+    assert math.isclose(pred_logits.grad[0, 0, 0].item(), expected_first.item(), rel_tol=1e-5)
+    assert pred_logits.grad[0, 1, 0].item() == 0.0
 
 
 def test_train_one_epoch_drops_step_when_micro_step_ooms():
@@ -500,7 +503,7 @@ def test_train_one_epoch_drops_step_when_micro_step_ooms():
             optimizer,
             ema=ema,
             lr_warmup_scheduler=warmup,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -539,7 +542,7 @@ def test_train_one_epoch_drops_step_when_device_transfer_ooms():
             criterion,
             data_loader,
             optimizer,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -562,7 +565,7 @@ def test_train_one_epoch_shrinks_micro_batch_after_oom():
             criterion,
             data_loader,
             optimizer,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -600,7 +603,7 @@ def test_train_one_epoch_shrinks_runtime_size_after_device_transfer_oom_when_mic
             criterion,
             data_loader,
             optimizer,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -621,7 +624,7 @@ def test_train_one_epoch_shrinks_runtime_size_when_micro_batch_is_one():
             criterion,
             data_loader,
             optimizer,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -649,7 +652,7 @@ def test_train_one_epoch_keeps_synth_training_in_micro_batch_mode():
             data_loader,
             optimizer,
             build_synth=fake_build,
-            yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 0},
             prev_ap=0.5,
         )
 
@@ -673,7 +676,7 @@ def test_train_one_epoch_restores_workload_after_stable_steps():
             criterion,
             data_loader,
             optimizer,
-            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 0},
             prev_ap=0.0,
         )
 
@@ -707,7 +710,7 @@ def test_train_one_epoch_skips_building_synth_batch_when_weight_is_zero():
         data_loader,
         optimizer,
         build_synth=fail_if_called,
-        yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 5},
+        yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 0},
         prev_ap=0.0,
     )
 
@@ -762,7 +765,7 @@ def test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled():
             {"generated_images": 1.0, "filled_boxes": 1.0},
         ),
         use_dummy_autocast=True,
-        yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 5},
+        yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 0},
         prev_ap=0.5,
         epoch=1,
     )

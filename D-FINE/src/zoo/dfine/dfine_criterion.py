@@ -244,7 +244,7 @@ class DFINECriterion(nn.Module):
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
-    def loss_synthetic_negative(self, outputs, loss_weight=0.0, topk=5):
+    def loss_synthetic_negative(self, outputs, loss_weight=0.0, topk=0):
         zero = outputs["pred_logits"].sum() * 0.0
         self.latest_synth_neg_stats = {
             "topk_queries": 0.0,
@@ -259,12 +259,19 @@ class DFINECriterion(nn.Module):
             return {"loss_synth_neg": zero}
 
         query_logits = logits.max(dim=-1).values if logits.shape[-1] > 1 else logits[..., 0]
-        k = min(max(int(topk), 0), query_logits.shape[1])
-        if k == 0:
+        activated_mask = query_logits > 0
+        activated_logits = query_logits[activated_mask]
+        if activated_logits.numel() == 0:
             return {"loss_synth_neg": zero}
 
-        top_logits = torch.topk(query_logits, k=k, dim=1).values
-        loss = F.softplus(top_logits).mean() * loss_weight
+        if int(topk) > 0:
+            k = min(int(topk), activated_logits.numel())
+            penalized_logits = torch.topk(activated_logits, k=k, dim=0).values
+        else:
+            penalized_logits = activated_logits
+            k = activated_logits.numel()
+
+        loss = F.softplus(penalized_logits).mean() * loss_weight
         self.latest_synth_neg_stats = {
             "topk_queries": float(k),
             "mean_logit": query_logits.mean().detach().item(),
