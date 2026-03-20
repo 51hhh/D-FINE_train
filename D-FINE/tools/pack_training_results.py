@@ -6,51 +6,69 @@ python tools/pack_training_results.py \
     --pack-dir /personal/
 '''
 
-"""训练后自动评估和打包脚本"""
+"""训练后自动评估和打包脚本。直接运行 test-only，完成 AP 与 OA 测评后统一打包。"""
 import argparse
+import ast
 import json
-import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-import shutil
+
+import yaml
+
+
+def parse_oa_result_line(line):
+    """解析 test-only 输出中的 OA 结果。"""
+    line = line.strip()
+    if not line or "Over-Activation @" not in line:
+        return None
+
+    prefix, metrics_str = line.split(":", 1)
+    try:
+        metrics = ast.literal_eval(metrics_str.strip())
+    except (SyntaxError, ValueError):
+        return None
+
+    threshold_str = prefix.split("@", 1)[1].strip()
+    phase = "standalone"
+    epoch = -1
+    if "[epoch " in threshold_str:
+        threshold, rest = threshold_str.split("[epoch ", 1)
+        epoch = int(rest.rstrip("] "))
+        phase = "epoch"
+    elif "[final]" in threshold_str:
+        threshold = threshold_str.split("[final]", 1)[0]
+        phase = "final"
+    else:
+        threshold = threshold_str
+
+    return {
+        "epoch": epoch,
+        "phase": phase,
+        "threshold": float(threshold.strip()),
+        **metrics,
+    }
+
 
 def extract_oa_results(log_file):
-    """从训练日志中提取 OA 评估结果"""
-    oa_results = []
-    pattern = r"Over-Activation @([\d.]+) \[epoch (\d+)\]: (\{.*?\})"
-
+    """从日志中提取 OA 结果，仅作兼容保留。"""
+    results = []
     if not log_file.exists():
-        return oa_results
-
+        return results
     with open(log_file, 'r', encoding='utf-8') as f:
         for line in f:
-            match = re.search(pattern, line)
-            if match:
-                threshold = float(match.group(1))
-                epoch = int(match.group(2))
-                metrics_str = match.group(3).replace("'", '"')
-                try:
-                    metrics = json.loads(metrics_str)
-                    oa_results.append({
-                        'epoch': epoch,
-                        'threshold': threshold,
-                        **metrics
-                    })
-                except json.JSONDecodeError:
-                    continue
+            parsed = parse_oa_result_line(line)
+            if parsed is not None:
+                results.append(parsed)
+    return results
 
-    return oa_results
 
 def generate_oa_report(oa_results, output_dir):
-    """生成 OA 评估报告"""
     if not oa_results:
         return None
 
-    # 找到最佳 OA 结果（最低 fppi）
     best_oa = min(oa_results, key=lambda x: x.get('oa_fppi', float('inf')))
-
-    # 生成 JSON 报告
     report = {
         'total_evaluations': len(oa_results),
         'best_result': best_oa,
@@ -60,14 +78,13 @@ def generate_oa_report(oa_results, output_dir):
             'best_oa_fppi': best_oa.get('oa_fppi', 0),
             'best_oa_clean_rate': best_oa.get('oa_clean_rate', 0),
             'best_oa_max_score': best_oa.get('oa_max_score', 0),
-        }
+        },
     }
 
     json_path = output_dir / 'oa_report.json'
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    # 生成 Markdown 报告
     md_lines = [
         '# Over-Activation 评估报告\n',
         f'## 最佳结果 (Epoch {best_oa["epoch"]})\n',
@@ -75,13 +92,12 @@ def generate_oa_report(oa_results, output_dir):
         f'- **OA Clean Rate**: {best_oa.get("oa_clean_rate", 0):.4f}',
         f'- **OA Max Score**: {best_oa.get("oa_max_score", 0):.4f}\n',
         f'## 评估历史 (共 {len(oa_results)} 次)\n',
-        '| Epoch | OA FPPI | Clean Rate | Max Score |',
-        '|-------|---------|------------|-----------|',
+        '| Epoch | Phase | OA FPPI | Clean Rate | Max Score |',
+        '|-------|-------|---------|------------|-----------|',
     ]
-
-    for result in sorted(oa_results, key=lambda x: x['epoch']):
+    for result in oa_results:
         md_lines.append(
-            f'| {result["epoch"]} | {result.get("oa_fppi", 0):.4f} | '
+            f'| {result["epoch"]} | {result.get("phase", "standalone")} | {result.get("oa_fppi", 0):.4f} | '
             f'{result.get("oa_clean_rate", 0):.4f} | {result.get("oa_max_score", 0):.4f} |'
         )
 
@@ -90,6 +106,86 @@ def generate_oa_report(oa_results, output_dir):
         f.write('\n'.join(md_lines))
 
     return report
+
+
+def load_oa_eval_settings(config_path):
+    settings = {
+        'negative_img_dir': '../coco/images/negative_samples',
+        'oa_conf_threshold': 0.3,
+        'input_size': 640,
+    }
+    if not Path(config_path).exists():
+        return settings
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f) or {}
+
+    settings['negative_img_dir'] = cfg.get('negative_img_dir', settings['negative_img_dir'])
+    settings['oa_conf_threshold'] = float(cfg.get('oa_conf_threshold', settings['oa_conf_threshold']))
+    input_size = cfg.get('eval_spatial_size', settings['input_size'])
+    if isinstance(input_size, (list, tuple)):
+        input_size = input_size[0]
+    settings['input_size'] = int(input_size)
+    return settings
+
+
+def build_test_only_command(model_path, config_path, oa_settings):
+    return [
+        'python', 'train.py',
+        '-c', Path(config_path).as_posix(),
+        '--test-only',
+        '-r', Path(model_path).as_posix(),
+        '-u',
+        'eval_overactivation=True',
+        f'negative_img_dir={oa_settings["negative_img_dir"]}',
+        f'oa_conf_threshold={oa_settings["oa_conf_threshold"]}',
+        f'eval_spatial_size=[{oa_settings["input_size"]},{oa_settings["input_size"]}]',
+    ]
+
+
+def extract_best_metrics_from_log(log_file):
+    best_ap, best_epoch = 0.0, -1
+    if not log_file.exists():
+        return best_ap, best_epoch
+
+    with open(log_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith('{'):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ap = data.get('test_coco_eval_bbox', [0])[0]
+            if ap > best_ap:
+                best_ap = ap
+                best_epoch = data.get('epoch', -1)
+    return best_ap, best_epoch
+
+
+def run_test_and_oa(best_model, config_path, oa_settings, output_dir):
+    cmd = build_test_only_command(best_model, config_path, oa_settings)
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8')
+
+    eval_log = output_dir / 'eval_stdout.txt'
+    eval_log.write_text(result.stdout, encoding='utf-8')
+    if result.stderr:
+        (output_dir / 'eval_stderr.txt').write_text(result.stderr, encoding='utf-8')
+
+    oa_results = []
+    for line in result.stdout.splitlines():
+        parsed = parse_oa_result_line(line)
+        if parsed is not None:
+            oa_results.append(parsed)
+
+    oa_json_path = output_dir / 'oa_eval_result.json'
+    if oa_results:
+        with open(oa_json_path, 'w', encoding='utf-8') as f:
+            json.dump(oa_results[-1], f, indent=2, ensure_ascii=False)
+
+    return oa_results, result.stdout
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -100,105 +196,39 @@ def main():
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
+    config_path = Path(args.config)
     if not output_dir.exists():
         print(f"错误: 输出目录不存在 {output_dir}")
         sys.exit(1)
 
-    # 1. 查找最佳模型
     best_model = output_dir / 'best_stg2.pth'
     if not best_model.exists():
         best_model = output_dir / 'best_stg1.pth'
     if not best_model.exists():
-        print(f"错误: 未找到best模型文件")
+        print('错误: 未找到best模型文件')
         sys.exit(1)
-    print(f"找到模型: {best_model}")
+    print(f'找到模型: {best_model}')
 
-    # 2. 读取log.txt获取最佳epoch和AP
     log_file = Path(args.log_file) if args.log_file else (output_dir / 'log.txt')
-    best_ap, best_epoch = 0, -1
-    if log_file.exists():
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip() and line.strip().startswith('{'):
-                    try:
-                        data = json.loads(line)
-                        ap = data.get('test_coco_eval_bbox', [0])[0]
-                        if ap > best_ap:
-                            best_ap = ap
-                            best_epoch = data['epoch']
-                    except json.JSONDecodeError:
-                        continue
-    print(f"最佳结果: AP={best_ap:.4f} @ epoch {best_epoch}")
+    best_ap, best_epoch = extract_best_metrics_from_log(log_file)
+    print(f'最佳结果: AP={best_ap:.4f} @ epoch {best_epoch}')
 
-    # 2.5 提取 OA 评估结果
-    print("\n提取 OA 评估结果...")
-    oa_results = extract_oa_results(log_file)
+    oa_settings = load_oa_eval_settings(config_path)
+    print('\n运行模型测试 + OA 测评...')
+    oa_results, _ = run_test_and_oa(best_model, config_path, oa_settings, output_dir)
     if oa_results:
-        oa_report = generate_oa_report(oa_results, output_dir)
-        print(f"  ✓ 找到 {len(oa_results)} 次 OA 评估")
-        if oa_report:
-            best_oa = oa_report['best_result']
-            print(f"  ✓ 最佳 OA: FPPI={best_oa.get('oa_fppi', 0):.4f} @ epoch {best_oa['epoch']}")
+        generate_oa_report(oa_results, output_dir)
+        best_oa = min(oa_results, key=lambda x: x.get('oa_fppi', float('inf')))
+        print(f"  ✓ OA 评估完成: FPPI={best_oa.get('oa_fppi', 0):.4f}")
     else:
-        print("  ⚠ 未找到 OA 评估结果")
+        print('  ⚠ test-only 输出中未找到 OA 结果')
 
-    # 3. 运行模型测试
-    print("\n运行模型测试...")
-    test_cmd = [
-        'python', 'train.py',
-        '-c', args.config,
-        '--test-only',
-        '-r', str(best_model),
-    ]
-    subprocess.run(test_cmd, check=True)
-
-    # 4. 如果日志中没有 OA 数据，运行独立 OA 评估
-    if not oa_results:
-        print("\n日志中未找到 OA 数据，运行独立 OA 评估...")
-        oa_script = Path('tools/eval_overactivation.py')
-        if not oa_script.exists():
-            oa_script = Path('benchmark/scripts/eval_overactivation.py')
-
-        if oa_script.exists():
-            oa_output = output_dir / 'oa_eval_result.json'
-            oa_cmd = [
-                'python', str(oa_script),
-                '--model-path', str(best_model),
-                '--config', args.config,
-                '--negative-dir', '../coco/images/negative_samples',
-                '--output', str(oa_output),
-            ]
-            try:
-                subprocess.run(oa_cmd, check=True)
-                # 读取评估结果并转换为统一格式
-                if oa_output.exists():
-                    with open(oa_output, 'r', encoding='utf-8') as f:
-                        eval_result = json.load(f)
-                    # 转换为 oa_results 格式
-                    oa_results = [{
-                        'epoch': best_epoch,
-                        'threshold': 0.3,
-                        'oa_fppi': eval_result.get('oa_fppi', 0),
-                        'oa_clean_rate': eval_result.get('oa_clean_rate', 0),
-                        'oa_max_score': eval_result.get('oa_max_score', 0),
-                    }]
-                    oa_report = generate_oa_report(oa_results, output_dir)
-                    print(f"  ✓ OA 评估完成: FPPI={oa_results[0]['oa_fppi']:.4f}")
-            except Exception as e:
-                print(f"  ⚠ OA 评估失败: {e}")
-        else:
-            print(f"  ⚠ 未找到 OA 评估脚本: {oa_script}")
-    else:
-        print(f"  ✓ 使用日志中的 OA 数据（{len(oa_results)} 次评估）")
-
-    # 5. 打包文件
-    print("\n打包文件...")
+    print('\n打包文件...')
     exp_name = output_dir.name
     pack_name = f"{exp_name}_epoch{best_epoch}_AP{best_ap:.4f}".replace('.', '_')
     pack_path = Path(args.pack_dir) / pack_name
     pack_path.mkdir(parents=True, exist_ok=True)
 
-    # 复制文件
     files_to_pack = [
         ('best_stg2.pth', '模型文件'),
         ('best_stg1.pth', '模型文件'),
@@ -206,34 +236,34 @@ def main():
         ('log.txt', '训练日志'),
         ('oa_report.json', 'OA评估报告(JSON)'),
         ('oa_report.md', 'OA评估报告(Markdown)'),
+        ('oa_eval_result.json', 'OA评估结果'),
+        ('eval_stdout.txt', 'test-only输出'),
+        ('eval_stderr.txt', 'test-only错误输出'),
     ]
 
     for fname, desc in files_to_pack:
         src = output_dir / fname
         if src.exists():
             shutil.copy2(src, pack_path / fname)
-            print(f"  ✓ {desc}: {fname}")
-        elif 'oa_report' not in fname:  # OA 报告可能不存在
-            print(f"  ⚠ 未找到: {fname}")
+            print(f'  ✓ {desc}: {fname}')
+        elif fname not in {'best_oa.pth', 'oa_report.json', 'oa_report.md', 'oa_eval_result.json', 'eval_stderr.txt'}:
+            print(f'  ⚠ 未找到: {fname}')
 
-    # 复制TensorBoard日志
     summary_dir = output_dir / 'summary'
     if summary_dir.exists():
         shutil.copytree(summary_dir, pack_path / 'summary', dirs_exist_ok=True)
-        print(f"  ✓ TensorBoard日志: summary/")
+        print('  ✓ TensorBoard日志: summary/')
 
-    # 创建README
     readme = pack_path / 'README.txt'
-    oa_summary = ""
+    oa_summary = ''
     if oa_results:
         best_oa = min(oa_results, key=lambda x: x.get('oa_fppi', float('inf')))
         oa_summary = f"""
 OA评估结果:
-- 最佳OA Epoch: {best_oa['epoch']}
 - OA FPPI: {best_oa.get('oa_fppi', 0):.4f}
 - OA Clean Rate: {best_oa.get('oa_clean_rate', 0):.4f}
 - OA Max Score: {best_oa.get('oa_max_score', 0):.4f}
-- 总评估次数: {len(oa_results)}
+- OA 阈值: {best_oa.get('threshold', 0):.4f}
 """
 
     with open(readme, 'w', encoding='utf-8') as f:
@@ -248,15 +278,16 @@ OA评估结果:
 - best_stg1.pth: 最佳模型（stg1阶段）
 - best_oa.pth: OA最优模型（如果有）
 - log.txt: 完整训练日志
-- oa_report.json: OA评估报告（JSON格式）
-- oa_report.md: OA评估报告（Markdown格式）
+- oa_report.json / oa_report.md: OA评估报告
+- oa_eval_result.json: 当前 best checkpoint 的 OA 结果
+- eval_stdout.txt / eval_stderr.txt: test-only 原始输出
 - summary/: TensorBoard训练曲线
 """)
 
-    # 压缩
-    print(f"\n压缩到: {pack_path}.zip")
+    print(f'\n压缩到: {pack_path}.zip')
     shutil.make_archive(str(pack_path), 'zip', pack_path.parent, pack_path.name)
-    print(f"✓ 打包完成: {pack_path}.zip")
+    print(f'✓ 打包完成: {pack_path}.zip')
+
 
 if __name__ == '__main__':
     main()
