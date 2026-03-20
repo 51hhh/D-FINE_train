@@ -411,6 +411,7 @@ def test_loss_synthetic_negative_uses_topk_softplus_and_weight():
         "pred_logits": torch.tensor([[[4.0], [1.0], [-2.0]]], dtype=torch.float32),
         "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1], [0.8, 0.8, 0.1, 0.1]]], dtype=torch.float32),
     }
+    # topk=2 now selects top-2 per sample along dim=1 (including negative logits)
     loss_dict = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=2)
     expected = (F.softplus(torch.tensor(4.0)) + F.softplus(torch.tensor(1.0))) / 2
     assert math.isclose(loss_dict["loss_synth_neg"].item(), expected.item(), rel_tol=1e-5)
@@ -432,7 +433,7 @@ def test_loss_synthetic_negative_zero_weight_returns_zero():
     assert loss_dict["loss_synth_neg"].item() == 0.0
 
 
-def test_loss_synthetic_negative_uses_all_activated_queries_when_topk_disabled():
+def test_loss_synthetic_negative_uses_all_queries_when_topk_disabled():
     criterion = DFINECriterion(
         matcher=DummyMatcher(),
         weight_dict={"loss_vfl": 1, "loss_bbox": 1, "loss_giou": 1, "loss_fgl": 1, "loss_ddf": 1},
@@ -443,10 +444,11 @@ def test_loss_synthetic_negative_uses_all_activated_queries_when_topk_disabled()
         "pred_logits": torch.tensor([[[4.0], [1.0], [-2.0]]], dtype=torch.float32),
         "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1], [0.8, 0.8, 0.1, 0.1]]], dtype=torch.float32),
     }
+    # topk=0 now penalizes ALL queries (including negative logits), not just activated ones
     loss_dict = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=0)
-    expected = (F.softplus(torch.tensor(4.0)) + F.softplus(torch.tensor(1.0))) / 2
+    expected = (F.softplus(torch.tensor(4.0)) + F.softplus(torch.tensor(1.0)) + F.softplus(torch.tensor(-2.0))) / 3
     assert math.isclose(loss_dict["loss_synth_neg"].item(), expected.item(), rel_tol=1e-5)
-    assert criterion.latest_synth_neg_stats["topk_queries"] == 2.0
+    assert criterion.latest_synth_neg_stats["topk_queries"] == 3.0
 
 
 def test_loss_synthetic_negative_multi_class_uses_max_class_logit():
@@ -456,6 +458,7 @@ def test_loss_synthetic_negative_multi_class_uses_max_class_logit():
         losses=["vfl", "boxes", "local"],
         num_classes=2,
     )
+    # query_logits after max(dim=-1): [3.0, 2.5, 0.2] → topk=2 selects [3.0, 2.5]
     outputs = {
         "pred_logits": torch.tensor([[[0.5, 3.0], [2.5, -1.0], [0.1, 0.2]]], dtype=torch.float32),
         "pred_boxes": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1], [0.8, 0.8, 0.1, 0.1]]], dtype=torch.float32),
@@ -464,10 +467,11 @@ def test_loss_synthetic_negative_multi_class_uses_max_class_logit():
     expected = (F.softplus(torch.tensor(3.0)) + F.softplus(torch.tensor(2.5))) / 2
     assert math.isclose(loss_dict["loss_synth_neg"].item(), expected.item(), rel_tol=1e-5)
     assert math.isclose(criterion.latest_synth_neg_stats["max_logit"], 3.0, rel_tol=1e-5)
+    # mean_logit is over all queries: (3.0 + 2.5 + 0.2) / 3 = 1.9
     assert math.isclose(criterion.latest_synth_neg_stats["mean_logit"], 1.9, rel_tol=1e-5)
 
 
-def test_loss_synthetic_negative_ignores_non_activated_queries_when_topk_disabled():
+def test_loss_synthetic_negative_provides_gradient_to_all_queries():
     criterion = DFINECriterion(
         matcher=DummyMatcher(),
         weight_dict={"loss_vfl": 1, "loss_bbox": 1, "loss_giou": 1, "loss_fgl": 1, "loss_ddf": 1},
@@ -481,10 +485,36 @@ def test_loss_synthetic_negative_ignores_non_activated_queries_when_topk_disable
     }
     loss = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=0)["loss_synth_neg"]
     loss.backward()
-    expected_first = torch.sigmoid(torch.tensor(1.0)) / 1.0
+    # softplus'(x) = sigmoid(x); mean over 2 queries → divide by 2
+    expected_first = torch.sigmoid(torch.tensor(1.0)) / 2.0
+    expected_second = torch.sigmoid(torch.tensor(-2.0)) / 2.0
     assert pred_logits.grad is not None
     assert math.isclose(pred_logits.grad[0, 0, 0].item(), expected_first.item(), rel_tol=1e-5)
-    assert pred_logits.grad[0, 1, 0].item() == 0.0
+    # No hard threshold: negative logits also receive gradient (small but nonzero)
+    assert math.isclose(pred_logits.grad[0, 1, 0].item(), expected_second.item(), rel_tol=1e-5)
+
+
+def test_loss_synthetic_negative_multi_batch_topk():
+    criterion = DFINECriterion(
+        matcher=DummyMatcher(),
+        weight_dict={"loss_vfl": 1, "loss_bbox": 1, "loss_giou": 1, "loss_fgl": 1, "loss_ddf": 1},
+        losses=["vfl", "boxes", "local"],
+        num_classes=1,
+    )
+    # batch=2, queries=3: topk=2 should select per-sample along dim=1
+    outputs = {
+        "pred_logits": torch.tensor([
+            [[5.0], [2.0], [1.0]],
+            [[3.0], [0.5], [-1.0]],
+        ], dtype=torch.float32),
+        "pred_boxes": torch.zeros(2, 3, 4, dtype=torch.float32),
+    }
+    loss_dict = criterion.loss_synthetic_negative(outputs, loss_weight=1.0, topk=2)
+    # per-sample top-2: sample0=[5,2], sample1=[3,0.5] → mean over 4 elements
+    expected = (F.softplus(torch.tensor(5.0)) + F.softplus(torch.tensor(2.0))
+                + F.softplus(torch.tensor(3.0)) + F.softplus(torch.tensor(0.5))) / 4
+    assert math.isclose(loss_dict["loss_synth_neg"].item(), expected.item(), rel_tol=1e-5)
+    assert criterion.latest_synth_neg_stats["topk_queries"] == 2.0
 
 
 def test_train_one_epoch_drops_step_when_micro_step_ooms():

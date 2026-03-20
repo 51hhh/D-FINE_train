@@ -27,7 +27,7 @@ DFINECriterion:
   bg_loss_weight: 4.0         # 背景 query VFL loss 权重倍数（从2.0提升到4.0，更激进抑制误检）
 
 synthetic_neg_weight_coeff: 3.0   # x，最终权重 = x * (2 * AP)^2；AP>0.8 后让妙妙loss具备主导能力
-synthetic_neg_topk: 0              # 0=惩罚所有激活(query_logit>0)的 query，而不是只罚 top-k
+synthetic_neg_topk: 0              # 0=penalize all queries (softplus natural decay; negative logits get small but nonzero gradient)
 synthetic_neg_expand_ratio: 1.15   # 擦除框扩张比例，避免残留球边缘
 synthetic_neg_max_trials: 30       # 背景 patch 回填的最大随机尝试次数
 synthetic_neg_fill_background_prob: 0.5
