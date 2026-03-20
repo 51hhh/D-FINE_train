@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.solver.det_engine import build_synthetic_negative_batch, compute_synthetic_negative_weight
+from src.solver import det_engine
+from src.solver.det_engine import build_synthetic_negative_batch, compute_synthetic_negative_weight, train_one_epoch
 from src.solver.det_solver import _get_bbox_ap50_95
 from src.zoo.dfine.dfine_criterion import DFINECriterion
 
@@ -24,6 +25,112 @@ class DummyMatcher:
             tgt = torch.arange(num_gt, dtype=torch.int64)
             indices.append((src, tgt))
         return {"indices": indices}
+
+
+class DummyOptimizer:
+    def __init__(self):
+        self.param_groups = [{"lr": 0.0}]
+
+    def zero_grad(self):
+        return None
+
+    def step(self):
+        return None
+
+
+class DummyScaledLoss:
+    def __init__(self, loss):
+        self.loss = loss
+
+    def backward(self):
+        self.loss.backward()
+
+
+class DummyScaler:
+    def scale(self, loss):
+        return DummyScaledLoss(loss)
+
+    def unscale_(self, optimizer):
+        return None
+
+    def step(self, optimizer):
+        optimizer.step()
+
+    def update(self):
+        return None
+
+
+class DummyAutocast:
+    entered = []
+    current_enabled = False
+
+    def __init__(self, device_type=None, cache_enabled=None, enabled=True):
+        self.enabled = enabled
+        self.prev_enabled = None
+
+    def __enter__(self):
+        DummyAutocast.entered.append(self.enabled)
+        self.prev_enabled = DummyAutocast.current_enabled
+        DummyAutocast.current_enabled = self.enabled
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        DummyAutocast.current_enabled = self.prev_enabled
+        return False
+
+
+class DummyMetricLogger:
+    def __init__(self, delimiter="  "):
+        self.meters = {}
+
+    def add_meter(self, name, meter):
+        self.meters[name] = meter
+
+    def log_every(self, data_loader, print_freq, header):
+        for batch in data_loader:
+            yield batch
+
+    def update(self, **kwargs):
+        return None
+
+    def synchronize_between_processes(self):
+        return None
+
+
+class DummySmoothedValue:
+    def __init__(self, window_size=1, fmt="{value:.6f}"):
+        self.global_avg = 0.0
+
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+        self.param = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, samples, targets=None):
+        self.calls.append(DummyAutocast.current_enabled)
+        batch_size = samples.shape[0]
+        pred_logits = self.param.view(1, 1, 1).expand(batch_size, 2, 1)
+        pred_boxes = self.param.view(1, 1, 1).expand(batch_size, 2, 4)
+        return {"pred_logits": pred_logits, "pred_boxes": pred_boxes}
+
+
+class DummyCriterionForTrain(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.train_called = False
+        self.latest_synth_neg_stats = {}
+
+    def train(self):
+        self.train_called = True
+        return self
+
+    def __call__(self, outputs, targets, **metas):
+        return {"loss_main": outputs["pred_logits"].sum() * 0.0}
+
+    def loss_synthetic_negative(self, outputs, loss_weight=0.0, topk=5):
+        return {"loss_synth_neg": outputs["pred_logits"].sum() * 0.0}
 
 
 def test_compute_synthetic_negative_weight():
@@ -155,6 +262,105 @@ def test_loss_synthetic_negative_keeps_zero_grad_path_when_topk_disabled():
     assert torch.allclose(pred_logits.grad, torch.zeros_like(pred_logits.grad))
 
 
+def test_train_one_epoch_skips_building_synth_batch_when_weight_is_zero():
+    model = DummyModel()
+    criterion = DummyCriterionForTrain()
+    optimizer = DummyOptimizer()
+    data_loader = [
+        (
+            torch.ones((1, 3, 8, 8), dtype=torch.float32),
+            [{"boxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]], dtype=torch.float32), "labels": torch.tensor([0], dtype=torch.int64)}],
+        )
+    ]
+
+    original_build = det_engine.build_synthetic_negative_batch
+    original_metric_logger = det_engine.MetricLogger
+    original_smoothed = det_engine.SmoothedValue
+    original_is_main_process = det_engine.dist_utils.is_main_process
+    called = {"count": 0}
+
+    def fail_if_called(*args, **kwargs):
+        called["count"] += 1
+        raise AssertionError("build_synthetic_negative_batch should not be called when weight is zero")
+
+    det_engine.build_synthetic_negative_batch = fail_if_called
+    det_engine.MetricLogger = DummyMetricLogger
+    det_engine.SmoothedValue = DummySmoothedValue
+    det_engine.dist_utils.is_main_process = lambda: False
+    try:
+        train_one_epoch(
+            model,
+            criterion,
+            data_loader,
+            optimizer,
+            torch.device("cpu"),
+            epoch=0,
+            use_wandb=False,
+            yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 5},
+            prev_ap=0.0,
+        )
+    finally:
+        det_engine.build_synthetic_negative_batch = original_build
+        det_engine.MetricLogger = original_metric_logger
+        det_engine.SmoothedValue = original_smoothed
+        det_engine.dist_utils.is_main_process = original_is_main_process
+
+    assert called["count"] == 0
+
+
+def test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled():
+    model = DummyModel()
+    criterion = DummyCriterionForTrain()
+    optimizer = DummyOptimizer()
+    data_loader = [
+        (
+            torch.ones((1, 3, 8, 8), dtype=torch.float32),
+            [{"boxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]], dtype=torch.float32), "labels": torch.tensor([0], dtype=torch.int64)}],
+        )
+    ]
+
+    original_build = det_engine.build_synthetic_negative_batch
+    original_metric_logger = det_engine.MetricLogger
+    original_smoothed = det_engine.SmoothedValue
+    original_is_main_process = det_engine.dist_utils.is_main_process
+    original_autocast = det_engine.torch.autocast
+
+    det_engine.build_synthetic_negative_batch = lambda samples, targets, cfg: (
+        samples.clone(),
+        [{"boxes": torch.zeros((0, 4), dtype=torch.float32), "labels": torch.zeros((0,), dtype=torch.int64)}],
+        {"generated_images": 1.0, "filled_boxes": 1.0},
+    )
+    det_engine.MetricLogger = DummyMetricLogger
+    det_engine.SmoothedValue = DummySmoothedValue
+    det_engine.dist_utils.is_main_process = lambda: False
+    det_engine.torch.autocast = DummyAutocast
+    DummyAutocast.entered = []
+    DummyAutocast.current_enabled = False
+    try:
+        train_one_epoch(
+            model,
+            criterion,
+            data_loader,
+            optimizer,
+            torch.device("cpu"),
+            epoch=1,
+            use_wandb=False,
+            scaler=DummyScaler(),
+            yaml_cfg={"synthetic_neg_weight_coeff": 1.0, "synthetic_neg_topk": 5},
+            prev_ap=0.5,
+        )
+    finally:
+        det_engine.build_synthetic_negative_batch = original_build
+        det_engine.MetricLogger = original_metric_logger
+        det_engine.SmoothedValue = original_smoothed
+        det_engine.dist_utils.is_main_process = original_is_main_process
+        det_engine.torch.autocast = original_autocast
+
+    assert len(model.calls) == 2
+    assert model.calls == [True, True]
+    assert DummyAutocast.entered[:2] == [True, False]
+
+
 if __name__ == "__main__":
     test_compute_synthetic_negative_weight()
     test_get_bbox_ap50_95_handles_missing_stats()
@@ -164,4 +370,6 @@ if __name__ == "__main__":
     test_loss_synthetic_negative_handles_zero_topk()
     test_loss_synthetic_negative_multi_class_uses_max_class_logit()
     test_loss_synthetic_negative_keeps_zero_grad_path_when_topk_disabled()
+    test_train_one_epoch_skips_building_synth_batch_when_weight_is_zero()
+    test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled()
     print("ok")

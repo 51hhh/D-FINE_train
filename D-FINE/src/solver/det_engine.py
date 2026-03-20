@@ -208,11 +208,16 @@ def train_one_epoch(
         prev_ap = kwargs.get("prev_ap", 0.0)
         synth_weight_coeff = float(synth_cfg.get("synthetic_neg_weight_coeff", 1.0))
         synth_weight = compute_synthetic_negative_weight(prev_ap, coeff=synth_weight_coeff)
-        synth_samples, synth_targets, synth_stats = build_synthetic_negative_batch(samples, targets, synth_cfg)
+        synth_samples, synth_targets, synth_stats = None, [], {"generated_images": 0.0, "filled_boxes": 0.0}
+        if synth_weight > 0:
+            synth_samples, synth_targets, synth_stats = build_synthetic_negative_batch(samples, targets, synth_cfg)
 
         if scaler is not None:
             with torch.autocast(device_type=str(device), cache_enabled=True):
                 outputs = model(samples, targets=targets)
+                synth_outputs = None
+                if synth_samples is not None and synth_weight > 0:
+                    synth_outputs = model(synth_samples, targets=synth_targets)
 
             if torch.isnan(outputs["pred_boxes"]).any() or torch.isinf(outputs["pred_boxes"]).any():
                 print(outputs["pred_boxes"])
@@ -228,8 +233,7 @@ def train_one_epoch(
 
             with torch.autocast(device_type=str(device), enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
-                if synth_samples is not None and synth_weight > 0:
-                    synth_outputs = model(synth_samples, targets=synth_targets)
+                if synth_outputs is not None:
                     loss_dict.update(
                         criterion.loss_synthetic_negative(
                             synth_outputs,
