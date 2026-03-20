@@ -638,6 +638,7 @@ def evaluate(
     device,
     epoch: int,
     use_wandb: bool,
+    eval_use_amp=None,
     **kwargs,
 ):
     if use_wandb:
@@ -648,19 +649,20 @@ def evaluate(
     coco_evaluator.cleanup()
 
     metric_logger = MetricLogger(delimiter="  ")
-    # metric_logger.add_meter('class_error', SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = "Test:"
-
-    # iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessor.keys())
     iou_types = coco_evaluator.iou_types
-    # coco_evaluator = CocoEvaluator(base_ds, iou_types)
-    # coco_evaluator.coco_eval[iou_types[0]].params.iouThrs = [0, 0.1, 0.5, 0.75]
 
     gt: List[Dict[str, torch.Tensor]] = []
     preds: List[Dict[str, torch.Tensor]] = []
 
     output_dir = kwargs.get("output_dir", None)
     num_visualization_sample_batch = kwargs.get("num_visualization_sample_batch", 1)
+    runtime_state = None
+    eval_use_amp = device.type == "cuda" if eval_use_amp is None else bool(eval_use_amp)
+    cuda_total_memory = 0.0
+    if device.type == "cuda" and torch.cuda.is_available():
+        cuda_total_memory = float(torch.cuda.get_device_properties(device).total_memory)
+        torch.cuda.empty_cache()
 
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         global_step = epoch * len(data_loader) + i
@@ -668,49 +670,125 @@ def evaluate(
         if global_step < num_visualization_sample_batch and output_dir is not None and dist_utils.is_main_process():
             save_samples(samples, targets, output_dir, "val", normalized=False, box_fmt="xyxy")
 
-        samples = samples.to(device)
-        targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+        full_batch_size = len(targets)
+        target_runtime_size = int(max(samples.shape[-2:]))
+        runtime_state = _get_oom_runtime_state(runtime_state, full_batch_size, target_runtime_size)
+        batch_finished = False
 
-        outputs = model(samples)
-        # with torch.autocast(device_type=str(device)):
-        #     outputs = model(samples)
+        while not batch_finished:
+            effective_micro_batch_size = min(int(runtime_state["micro_batch_size"]), full_batch_size)
+            current_runtime_size = target_runtime_size
+            batch_results = []
+            batch_gt = []
+            batch_preds = []
 
-        # TODO (lyuwenyu), fix dataset converted using `convert_to_coco_api`?
-        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
-        # orig_target_sizes = torch.tensor([[samples.shape[-1], samples.shape[-2]]], device=samples.device)
+            try:
+                if device.type == "cuda" and torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats(device)
 
-        results = postprocessor(outputs, orig_target_sizes)
+                for micro_samples_cpu, micro_targets_cpu in _iter_micro_batches(samples, targets, effective_micro_batch_size):
+                    micro_samples_cpu, micro_targets_cpu = _apply_runtime_size_cap(
+                        micro_samples_cpu,
+                        micro_targets_cpu,
+                        runtime_state["runtime_max_size"],
+                    )
+                    current_runtime_size = int(max(micro_samples_cpu.shape[-2:]))
 
-        # if 'segm' in postprocessor.keys():
-        #     target_sizes = torch.stack([t["size"] for t in targets], dim=0)
-        #     results = postprocessor['segm'](results, outputs, orig_target_sizes, target_sizes)
+                    transfer_exception = None
+                    try:
+                        micro_samples, micro_targets = _move_batch_to_device(micro_samples_cpu, micro_targets_cpu, device)
+                    except Exception as exc:
+                        transfer_exception = exc
+                    _sync_step_status(transfer_exception, "eval_device_transfer")
 
-        res = {target["image_id"].item(): output for target, output in zip(targets, results)}
-        if coco_evaluator is not None:
-            coco_evaluator.update(res)
+                    res = None
+                    micro_gt = []
+                    micro_preds = []
+                    forward_exception = None
+                    try:
+                        forward_context = (
+                            torch.autocast(device_type=device.type, cache_enabled=True) if eval_use_amp else nullcontext()
+                        )
+                        with forward_context:
+                            outputs = model(micro_samples)
+                        orig_target_sizes = torch.stack([t["orig_size"] for t in micro_targets], dim=0)
+                        results = postprocessor(outputs, orig_target_sizes)
+                        res = {target["image_id"].item(): output for target, output in zip(micro_targets, results)}
 
-        # validator format for metrics
-        for idx, (target, result) in enumerate(zip(targets, results)):
-            gt.append(
-                {
-                    "boxes": scale_boxes(  # from model input size to original img size
-                        target["boxes"],
-                        (target["orig_size"][1], target["orig_size"][0]),
-                        (samples[idx].shape[-1], samples[idx].shape[-2]),
-                    ),
-                    "labels": target["labels"],
-                }
-            )
-            labels = (
-                torch.tensor([mscoco_category2label[int(x.item())] for x in result["labels"].flatten()])
-                .to(result["labels"].device)
-                .reshape(result["labels"].shape)
-            ) if postprocessor.remap_mscoco_category else result["labels"]
-            preds.append(
-                {"boxes": result["boxes"], "labels": labels, "scores": result["scores"]}
-            )
+                        for idx, (target, result) in enumerate(zip(micro_targets, results)):
+                            micro_gt.append(
+                                {
+                                    "boxes": scale_boxes(
+                                        target["boxes"],
+                                        (target["orig_size"][1], target["orig_size"][0]),
+                                        (micro_samples[idx].shape[-1], micro_samples[idx].shape[-2]),
+                                    ),
+                                    "labels": target["labels"],
+                                }
+                            )
+                            labels = (
+                                torch.tensor([mscoco_category2label[int(x.item())] for x in result["labels"].flatten()])
+                                .to(result["labels"].device)
+                                .reshape(result["labels"].shape)
+                            ) if postprocessor.remap_mscoco_category else result["labels"]
+                            micro_preds.append(
+                                {"boxes": result["boxes"], "labels": labels, "scores": result["scores"]}
+                            )
+                    except Exception as exc:
+                        forward_exception = exc
+                    _sync_step_status(forward_exception, "eval_forward")
 
-    # Conf matrix, F1, Precision, Recall, box IoU
+                    batch_results.append(res)
+                    batch_gt.extend(micro_gt)
+                    batch_preds.extend(micro_preds)
+
+                if coco_evaluator is not None:
+                    for res in batch_results:
+                        coco_evaluator.update(res)
+                gt.extend(batch_gt)
+                preds.extend(batch_preds)
+
+                peak_stats = _collect_cuda_peak_stats(device, total_memory=cuda_total_memory)
+                runtime_state["last_peak_allocated_mb"] = peak_stats["peak_allocated_mb"]
+                runtime_state["last_peak_ratio"] = peak_stats["peak_ratio"]
+                runtime_state["consecutive_oom"] = 0
+                runtime_state["stable_steps"] += 1
+                _recover_workload(runtime_state, full_batch_size, target_runtime_size)
+                batch_finished = True
+            except Exception as exc:
+                peak_stats = _collect_cuda_peak_stats(device, total_memory=cuda_total_memory)
+                runtime_state["last_peak_allocated_mb"] = peak_stats["peak_allocated_mb"]
+                runtime_state["last_peak_ratio"] = peak_stats["peak_ratio"]
+
+                if _is_memory_error(exc):
+                    prev_micro_batch_size = int(runtime_state["micro_batch_size"])
+                    prev_runtime_max_size = int(runtime_state["runtime_max_size"])
+                    runtime_state["stable_steps"] = 0
+                    runtime_state["consecutive_oom"] += 1
+                    runtime_state["oom_drop_steps"] += 1
+                    _shrink_workload(runtime_state, full_batch_size, current_runtime_size)
+                    if device.type == "cuda" and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if (
+                        int(runtime_state["micro_batch_size"]) == prev_micro_batch_size
+                        and int(runtime_state["runtime_max_size"]) == prev_runtime_max_size
+                    ):
+                        print(f"[Eval][OOM] Skip batch {i} after exhausting fallback workload controls")
+                        runtime_state["consecutive_oom"] = 0
+                        batch_finished = True
+                    continue
+                raise
+
+        metric_logger.update(
+            eval_oom_drop_steps=float(runtime_state["oom_drop_steps"]),
+            eval_oom_consecutive=float(runtime_state["consecutive_oom"]),
+            eval_micro_batch_size=float(runtime_state["micro_batch_size"]),
+            eval_runtime_max_size=float(runtime_state["runtime_max_size"]),
+            eval_peak_mem_mb=float(runtime_state["last_peak_allocated_mb"]),
+            eval_peak_mem_ratio=float(runtime_state["last_peak_ratio"]),
+            eval_workload_recoveries=float(runtime_state["workload_recoveries"]),
+        )
+
     metrics = Validator(gt, preds).compute_metrics()
     print("Metrics:", metrics)
     if use_wandb:
@@ -718,19 +796,16 @@ def evaluate(
         metrics["epoch"] = epoch
         wandb.log(metrics)
 
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
 
-    # accumulate predictions from all images
     if coco_evaluator is not None:
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
 
     stats = {}
-    # stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     if coco_evaluator is not None:
         if "bbox" in iou_types:
             stats["coco_eval_bbox"] = coco_evaluator.coco_eval["bbox"].stats.tolist()

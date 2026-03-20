@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.solver import det_engine
-from src.solver.det_engine import build_synthetic_negative_batch, compute_synthetic_negative_weight, train_one_epoch
+from src.solver.det_engine import build_synthetic_negative_batch, compute_synthetic_negative_weight, evaluate, train_one_epoch
 from src.solver.det_solver import _get_bbox_ap50_95
 from src.zoo.dfine.dfine_criterion import DFINECriterion
 
@@ -207,6 +208,9 @@ class DummyCriterionForTrain(nn.Module):
         self.train_called = True
         return self
 
+    def eval(self):
+        return self
+
     def __call__(self, outputs, targets, **metas):
         self.loss_calls += 1
         return {"loss_main": outputs["pred_logits"].sum() * 0.0}
@@ -214,6 +218,63 @@ class DummyCriterionForTrain(nn.Module):
     def loss_synthetic_negative(self, outputs, loss_weight=0.0, topk=5):
         self.synth_loss_calls += 1
         return {"loss_synth_neg": outputs["pred_logits"].sum() * 0.0}
+
+
+class DummyEvalPostprocessor:
+    remap_mscoco_category = False
+
+    def __call__(self, outputs, orig_target_sizes):
+        results = []
+        for idx in range(outputs["pred_logits"].shape[0]):
+            device = outputs["pred_logits"].device
+            results.append(
+                {
+                    "boxes": torch.tensor([[1.0, 1.0, 2.0, 2.0]], dtype=torch.float32, device=device),
+                    "labels": torch.tensor([0], dtype=torch.int64, device=device),
+                    "scores": torch.tensor([0.5], dtype=torch.float32, device=device),
+                }
+            )
+        return results
+
+
+class DummyBBoxEval:
+    def __init__(self):
+        self.stats = np.zeros(12, dtype=np.float32)
+
+
+class DummyEvalCocoEvaluator:
+    def __init__(self):
+        self.iou_types = ["bbox"]
+        self.updated_batches = []
+        self.coco_eval = {"bbox": DummyBBoxEval()}
+        self.cleanup_calls = 0
+        self.accumulate_calls = 0
+        self.summarize_calls = 0
+        self.sync_calls = 0
+
+    def cleanup(self):
+        self.cleanup_calls += 1
+
+    def update(self, res):
+        self.updated_batches.append(res)
+
+    def synchronize_between_processes(self):
+        self.sync_calls += 1
+
+    def accumulate(self):
+        self.accumulate_calls += 1
+
+    def summarize(self):
+        self.summarize_calls += 1
+
+
+class DummyValidator:
+    def __init__(self, gt, preds):
+        self.gt = gt
+        self.preds = preds
+
+    def compute_metrics(self):
+        return {"f1": 0.0, "precision": 0.0, "recall": 0.0, "iou": 0.0, "TPs": 0.0, "FPs": 0.0, "FNs": 0.0}
 
 
 def make_batch(batch_size, size=8):
@@ -232,30 +293,61 @@ def make_batch(batch_size, size=8):
     return samples, targets
 
 
-def run_train_one_epoch_for_test(model, criterion, data_loader, optimizer, **kwargs):
-    build_synth = kwargs.pop("build_synth", None)
-    use_dummy_autocast = kwargs.pop("use_dummy_autocast", False)
-
+def _enter_common_test_patches(stack: ExitStack, use_dummy_autocast: bool, extra_patchers=None):
     patchers = [
         patch.object(det_engine, "MetricLogger", DummyMetricLogger),
         patch.object(det_engine, "SmoothedValue", DummySmoothedValue),
         patch.object(det_engine.dist_utils, "is_main_process", lambda: False),
     ]
-    if build_synth is not None:
-        patchers.append(patch.object(det_engine, "build_synthetic_negative_batch", build_synth))
+    if extra_patchers:
+        patchers.extend(extra_patchers)
     if use_dummy_autocast:
         DummyAutocast.entered = []
         DummyAutocast.current_enabled = False
         patchers.append(patch.object(det_engine.torch, "autocast", DummyAutocast))
+    for patcher in patchers:
+        stack.enter_context(patcher)
+
+
+def run_train_one_epoch_for_test(model, criterion, data_loader, optimizer, **kwargs):
+    build_synth = kwargs.pop("build_synth", None)
+    use_dummy_autocast = kwargs.pop("use_dummy_autocast", False)
+    extra_patchers = []
+    if build_synth is not None:
+        extra_patchers.append(patch.object(det_engine, "build_synthetic_negative_batch", build_synth))
 
     with ExitStack() as stack:
-        for patcher in patchers:
-            stack.enter_context(patcher)
+        _enter_common_test_patches(stack, use_dummy_autocast, extra_patchers=extra_patchers)
         return train_one_epoch(
             model,
             criterion,
             data_loader,
             optimizer,
+            torch.device("cpu"),
+            epoch=kwargs.pop("epoch", 0),
+            use_wandb=False,
+            **kwargs,
+        )
+
+
+def run_evaluate_for_test(model, data_loader, **kwargs):
+    use_dummy_autocast = kwargs.pop("use_dummy_autocast", False)
+    coco_evaluator = kwargs.pop("coco_evaluator", None) or DummyEvalCocoEvaluator()
+    criterion = kwargs.pop("criterion", None) or DummyCriterionForTrain()
+    postprocessor = kwargs.pop("postprocessor", None) or DummyEvalPostprocessor()
+
+    with ExitStack() as stack:
+        _enter_common_test_patches(
+            stack,
+            use_dummy_autocast,
+            extra_patchers=[patch.object(det_engine, "Validator", DummyValidator)],
+        )
+        return evaluate(
+            model,
+            criterion,
+            postprocessor,
+            data_loader,
+            coco_evaluator,
             torch.device("cpu"),
             epoch=kwargs.pop("epoch", 0),
             use_wandb=False,
@@ -622,6 +714,31 @@ def test_train_one_epoch_skips_building_synth_batch_when_weight_is_zero():
     assert called["count"] == 0
 
 
+def test_evaluate_drops_large_micro_batch_after_oom_and_finishes():
+    model = RecordingModel(fail_predicate=lambda call: call["phase"] == "main" and call["batch_size"] > 2)
+    data_loader = [make_batch(4, 8)]
+
+    with patch.object(det_engine, "_is_memory_error", side_effect=lambda exc: isinstance(exc, FakeOOMError)):
+        stats, coco_evaluator = run_evaluate_for_test(model, data_loader)
+
+    assert [call["batch_size"] for call in model.calls if call["phase"] == "main"] == [4, 2, 2]
+    assert coco_evaluator.cleanup_calls == 1
+    assert len(coco_evaluator.updated_batches) == 2
+    assert "coco_eval_bbox" in stats
+
+
+def test_evaluate_shrinks_runtime_size_when_micro_batch_is_one():
+    model = RecordingModel(fail_predicate=lambda call: call["phase"] == "main" and call["size"] > 64)
+    data_loader = [make_batch(1, 96)]
+
+    with patch.object(det_engine, "_is_memory_error", side_effect=lambda exc: isinstance(exc, FakeOOMError)):
+        stats, coco_evaluator = run_evaluate_for_test(model, data_loader)
+
+    assert [call["size"] for call in model.calls if call["phase"] == "main"] == [96, 64]
+    assert len(coco_evaluator.updated_batches) == 1
+    assert "coco_eval_bbox" in stats
+
+
 def test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled():
     model = DummyModel()
     criterion = DummyCriterionForTrain()
@@ -656,21 +773,7 @@ def test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled():
 
 
 if __name__ == "__main__":
-    test_compute_synthetic_negative_weight()
-    test_get_bbox_ap50_95_handles_missing_stats()
-    test_build_synthetic_negative_batch_creates_empty_target_images()
-    test_loss_synthetic_negative_uses_topk_softplus_and_weight()
-    test_loss_synthetic_negative_zero_weight_returns_zero()
-    test_loss_synthetic_negative_handles_zero_topk()
-    test_loss_synthetic_negative_multi_class_uses_max_class_logit()
-    test_loss_synthetic_negative_keeps_zero_grad_path_when_topk_disabled()
-    test_train_one_epoch_drops_step_when_micro_step_ooms()
-    test_train_one_epoch_drops_step_when_device_transfer_ooms()
-    test_train_one_epoch_shrinks_micro_batch_after_oom()
-    test_train_one_epoch_shrinks_runtime_size_after_device_transfer_oom_when_micro_batch_is_one()
-    test_train_one_epoch_shrinks_runtime_size_when_micro_batch_is_one()
-    test_train_one_epoch_keeps_synth_training_in_micro_batch_mode()
-    test_train_one_epoch_restores_workload_after_stable_steps()
-    test_train_one_epoch_skips_building_synth_batch_when_weight_is_zero()
-    test_train_one_epoch_runs_synth_forward_inside_autocast_when_amp_enabled()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
     print("ok")
