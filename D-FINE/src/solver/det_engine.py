@@ -195,6 +195,14 @@ def _iter_micro_batches(samples: torch.Tensor, targets, micro_batch_size: int) -
         yield samples[start:end], targets[start:end]
 
 
+def _move_targets_to_device(targets, device: torch.device):
+    return [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+
+
+def _move_batch_to_device(samples: torch.Tensor, targets, device: torch.device):
+    return samples.to(device), _move_targets_to_device(targets, device)
+
+
 def _align_size_down(value: int, multiple: int = 32) -> int:
     value = max(1, int(value))
     if value < multiple:
@@ -416,24 +424,22 @@ def train_one_epoch(
         if global_step < num_visualization_sample_batch and output_dir is not None and dist_utils.is_main_process():
             save_samples(samples, targets, output_dir, "train", normalized=True, box_fmt="cxcywh")
 
-        samples = samples.to(device)
-        targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
-
         full_batch_size = len(targets)
         target_runtime_size = int(max(samples.shape[-2:]))
         runtime_state = _get_oom_runtime_state(runtime_state, full_batch_size, target_runtime_size)
-        samples, targets = _apply_runtime_size_cap(samples, targets, runtime_state["runtime_max_size"])
-        current_runtime_size = int(max(samples.shape[-2:]))
         effective_micro_batch_size = min(int(runtime_state["micro_batch_size"]), full_batch_size)
         synth_weight = compute_synthetic_negative_weight(prev_ap, coeff=synth_weight_coeff)
         synth_stats = {"generated_images": 0.0, "filled_boxes": 0.0}
         accumulated_loss_dict = None
+        current_runtime_size = target_runtime_size
 
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
         optimizer.zero_grad(set_to_none=True)
 
         micro_batches = None
+        micro_samples_cpu = None
+        micro_targets_cpu = None
         micro_samples = None
         micro_targets = None
         outputs = None
@@ -445,17 +451,31 @@ def train_one_epoch(
         try:
             num_micro_batches = math.ceil(full_batch_size / effective_micro_batch_size)
             micro_batches = _iter_micro_batches(samples, targets, effective_micro_batch_size)
-            for micro_index, (micro_samples, micro_targets) in enumerate(micro_batches):
+            for micro_index, (micro_samples_cpu, micro_targets_cpu) in enumerate(micro_batches):
+                micro_samples = None
+                micro_targets = None
+                outputs = None
+                synth_outputs = None
+                synth_samples = None
+                synth_targets = None
+                loss_dict = None
+                loss = None
+                micro_samples_cpu, micro_targets_cpu = _apply_runtime_size_cap(
+                    micro_samples_cpu,
+                    micro_targets_cpu,
+                    runtime_state["runtime_max_size"],
+                )
+                current_runtime_size = int(max(micro_samples_cpu.shape[-2:]))
+                transfer_exception = None
+                try:
+                    micro_samples, micro_targets = _move_batch_to_device(micro_samples_cpu, micro_targets_cpu, device)
+                except Exception as exc:
+                    transfer_exception = exc
+                _sync_step_status(transfer_exception, "device_transfer")
                 micro_scale = float(len(micro_targets)) / float(full_batch_size)
                 is_last_micro_batch = micro_index + 1 == num_micro_batches
                 sync_context = model.no_sync() if can_defer_grad_sync and not is_last_micro_batch else nullcontext()
                 with sync_context:
-                    outputs = None
-                    synth_outputs = None
-                    synth_samples = None
-                    synth_targets = None
-                    loss_dict = None
-                    loss = None
                     micro_synth_stats = {"generated_images": 0.0, "filled_boxes": 0.0}
 
                     forward_exception = None

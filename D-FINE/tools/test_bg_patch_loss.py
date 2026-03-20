@@ -419,6 +419,45 @@ def test_train_one_epoch_drops_step_when_micro_step_ooms():
     assert stats["oom_drop_steps"] == 2.0
 
 
+def test_train_one_epoch_drops_step_when_device_transfer_ooms():
+    model = RecordingModel()
+    criterion = DummyCriterionForTrain()
+    optimizer = DummyOptimizer()
+    data_loader = [make_batch(4, 8), make_batch(4, 8)]
+    original_tensor_to = torch.Tensor.to
+    transfer_failed = {"done": False}
+
+    def fail_first_full_batch_transfer(tensor, *args, **kwargs):
+        if (
+            not transfer_failed["done"]
+            and isinstance(tensor, torch.Tensor)
+            and tuple(tensor.shape) == (4, 3, 8, 8)
+            and args
+            and isinstance(args[0], torch.device)
+        ):
+            transfer_failed["done"] = True
+            raise FakeOOMError("transfer oom")
+        return original_tensor_to(tensor, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "to", fail_first_full_batch_transfer), patch.object(
+        det_engine, "_is_memory_error", side_effect=lambda exc: isinstance(exc, FakeOOMError)
+    ):
+        stats = run_train_one_epoch_for_test(
+            model,
+            criterion,
+            data_loader,
+            optimizer,
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            prev_ap=0.0,
+        )
+
+    assert transfer_failed["done"] is True
+    assert [call["batch_size"] for call in model.calls if call["phase"] == "main"] == [2, 2]
+    assert optimizer.step_calls == 1
+    assert stats["oom_drop_steps"] == 1.0
+    assert stats["train_micro_batch_size"] == 2.0
+
+
 def test_train_one_epoch_shrinks_micro_batch_after_oom():
     model = RecordingModel(fail_indices={0})
     criterion = DummyCriterionForTrain()
@@ -438,6 +477,44 @@ def test_train_one_epoch_shrinks_micro_batch_after_oom():
     assert [call["batch_size"] for call in model.calls if call["phase"] == "main"] == [4, 2, 2]
     assert optimizer.step_calls == 1
     assert stats["train_micro_batch_size"] == 2.0
+
+
+def test_train_one_epoch_shrinks_runtime_size_after_device_transfer_oom_when_micro_batch_is_one():
+    model = RecordingModel()
+    criterion = DummyCriterionForTrain()
+    optimizer = DummyOptimizer()
+    data_loader = [make_batch(1, 96), make_batch(1, 96)]
+    original_tensor_to = torch.Tensor.to
+    transferred_sizes = []
+
+    def fail_large_transfer(tensor, *args, **kwargs):
+        if (
+            isinstance(tensor, torch.Tensor)
+            and tensor.ndim == 4
+            and tensor.shape[0] == 1
+            and args
+            and isinstance(args[0], torch.device)
+        ):
+            transferred_sizes.append(int(tensor.shape[-1]))
+            if tensor.shape[-1] > 64:
+                raise FakeOOMError("transfer oom")
+        return original_tensor_to(tensor, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "to", fail_large_transfer), patch.object(
+        det_engine, "_is_memory_error", side_effect=lambda exc: isinstance(exc, FakeOOMError)
+    ):
+        stats = run_train_one_epoch_for_test(
+            model,
+            criterion,
+            data_loader,
+            optimizer,
+            yaml_cfg={"synthetic_neg_weight_coeff": 0.0, "synthetic_neg_topk": 5},
+            prev_ap=0.0,
+        )
+
+    assert transferred_sizes == [96, 64]
+    assert optimizer.step_calls == 1
+    assert stats["train_runtime_max_size"] == 64.0
 
 
 def test_train_one_epoch_shrinks_runtime_size_when_micro_batch_is_one():
@@ -588,7 +665,9 @@ if __name__ == "__main__":
     test_loss_synthetic_negative_multi_class_uses_max_class_logit()
     test_loss_synthetic_negative_keeps_zero_grad_path_when_topk_disabled()
     test_train_one_epoch_drops_step_when_micro_step_ooms()
+    test_train_one_epoch_drops_step_when_device_transfer_ooms()
     test_train_one_epoch_shrinks_micro_batch_after_oom()
+    test_train_one_epoch_shrinks_runtime_size_after_device_transfer_oom_when_micro_batch_is_one()
     test_train_one_epoch_shrinks_runtime_size_when_micro_batch_is_one()
     test_train_one_epoch_keeps_synth_training_in_micro_batch_mode()
     test_train_one_epoch_restores_workload_after_stable_steps()
